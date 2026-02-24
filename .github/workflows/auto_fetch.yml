@@ -1,0 +1,38 @@
+name: 自動データ取得
+
+on:
+  schedule:
+    # 日本時間 9:00, 12:00, 15:30 に実行 (UTC: 0:00, 3:00, 6:30)
+    - cron: '0 0 * * 1-5'    # 月〜金 JST 9:00
+    - cron: '0 3 * * 1-5'    # 月〜金 JST 12:00
+    - cron: '30 6 * * 1-5'   # 月〜金 JST 15:30
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+      
+      - name: Pythonセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: 依存パッケージのインストール
+        run: pip install -r requirements.txt
+      
+      - name: データ取得を実行
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+        run: python auto_fetch.py
+      
+      - name: 変更をコミット & プッシュ
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add last_stock_data.json buy_timing_history.json
+          git diff --cached --quiet || git commit -m "🤖 自動データ取得 $(date '+%Y-%m-%d %H:%M')"
+          git push

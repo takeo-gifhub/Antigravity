@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# 機密情報（APIキーは st.secrets で管理）
+jquants_token.txt
+.streamlit/secrets.toml
+
+# ローカルのみのデータ（クラウドではリポジトリ内JSONを使用）
+saved_tickers.txt
+
+# テストファイル
+test_*.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
