@@ -1010,10 +1010,10 @@ if "stock_df" in st.session_state:
             def color_change(val):
                 if isinstance(val, str):
                     if "📈" in val:
-                        return "color: #2e7d32; font-weight: bold"
+                        return "color: #4caf50; font-weight: bold"
                     elif "📉" in val:
-                        return "color: #c62828; font-weight: bold"
-                return ""
+                        return "color: #ef5350; font-weight: bold"
+                return "color: #e0e0e0"
             
             for col in ["1W変動", "2W変動"]:
                 if col in styler.columns:
@@ -1027,55 +1027,51 @@ if "stock_df" in st.session_state:
         # ダークモード対応 CSS
         st.markdown("""
         <style>
-        :root {
-            --bg-current: #e8f5e9;
-            --bg-1w: #e3f2fd;
-            --bg-2w: #f3e5f5;
-            --table-border: #ddd;
-            --table-header-bg: #f0f2f6;
-            --table-text: #333;
-        }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg-current: #1b3d1f;
-                --bg-1w: #162d3e;
-                --bg-2w: #2d1b3d;
-                --table-border: #444;
-                --table-header-bg: #262730;
-                --table-text: #e0e0e0;
-            }
-        }
-        [data-theme="dark"] {
-            --bg-current: #1b3d1f;
-            --bg-1w: #162d3e;
-            --bg-2w: #2d1b3d;
-            --table-border: #444;
-            --table-header-bg: #262730;
-            --table-text: #e0e0e0;
-        }
         .stock-table-wrapper table {
             width: 100%;
             border-collapse: collapse;
             font-size: 0.85em;
-            color: var(--table-text);
+            color: #e0e0e0 !important;
         }
         .stock-table-wrapper th {
-            background-color: var(--table-header-bg);
+            background-color: #1a1a2e !important;
+            color: #ffffff !important;
             padding: 6px 8px;
             text-align: center;
             white-space: nowrap;
             position: sticky;
             top: 0;
-            border-bottom: 2px solid var(--table-border);
+            border-bottom: 2px solid #444;
+            font-weight: 600;
         }
         .stock-table-wrapper td {
             padding: 5px 8px;
             text-align: center;
             white-space: nowrap;
-            border-bottom: 1px solid var(--table-border);
+            border-bottom: 1px solid #333;
+            color: #e0e0e0 !important;
+            background-color: #0e1117 !important;
+        }
+        /* 買い時率 現在（緑系） */
+        .stock-table-wrapper td[style*="background-color: var(--bg-current)"],
+        .stock-table-wrapper tr td:nth-child(6),
+        .stock-table-wrapper tr td:nth-child(7) {
+            background-color: #1b3d1f !important;
+        }
+        /* 1W前（青系） */
+        .stock-table-wrapper tr td:nth-child(8),
+        .stock-table-wrapper tr td:nth-child(9),
+        .stock-table-wrapper tr td:nth-child(10) {
+            background-color: #162d3e !important;
+        }
+        /* 2W前（紫系） */
+        .stock-table-wrapper tr td:nth-child(11),
+        .stock-table-wrapper tr td:nth-child(12),
+        .stock-table-wrapper tr td:nth-child(13) {
+            background-color: #2d1b3d !important;
         }
         .stock-table-wrapper tr:hover td {
-            filter: brightness(0.92);
+            filter: brightness(1.2) !important;
         }
         .stock-table-wrapper a {
             text-decoration: none;
@@ -1085,6 +1081,10 @@ if "stock_df" in st.session_state:
         .stock-table-wrapper a:hover {
             transform: scale(1.3);
             display: inline-block;
+        }
+        /* Pandasが生成するインラインcolorを上書き */
+        .stock-table-wrapper td[style] {
+            color: #e0e0e0 !important;
         }
         </style>
         """, unsafe_allow_html=True)
