@@ -8,6 +8,9 @@ on:
     - cron: '30 6 * * 1-5'   # 月〜金 JST 15:30
   workflow_dispatch:  # 手動実行も可能
 
+permissions:
+  contents: write
+
 jobs:
   fetch:
     runs-on: ubuntu-latest

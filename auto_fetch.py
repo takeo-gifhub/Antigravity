@@ -38,12 +38,37 @@ def load_name_overrides():
             pass
     return {}
 
+def get_jquants_company_name(api_key, code, retries=3):
+    """J-Quants V2 APIから企業名を取得"""
+    jq_code = code + "0" if len(code) == 4 else code
+    url = f"https://api.jquants.com/v2/equities/master?code={jq_code}"
+    headers = {"x-api-key": api_key}
+    for attempt in range(retries):
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json().get("data", [])
+                if data:
+                    name = data[-1].get("CompanyName") or data[-1].get("CoName")
+                    if name:
+                        return name
+            elif res.status_code == 429:
+                wait = 3.0 * (attempt + 1)
+                print(f"  ⏳ J-Quants 429 レート制限 ({code}), {wait}秒待機...")
+                time.sleep(wait)
+                continue
+            else:
+                print(f"  ⚠️ J-Quants {res.status_code} ({code})")
+                break
+        except Exception as e:
+            print(f"  ⚠️ J-Quants 例外 ({code}): {e}")
+    return None
+
 def _score_to_label(score):
-    if score >= 80: return f"🟢 {score}%"
-    elif score >= 60: return f"🔵 {score}%"
-    elif score >= 40: return f"🟡 {score}%"
-    elif score >= 20: return f"🟠 {score}%"
-    else: return f"🔴 {score}%"
+    if score >= 85: return f"🔥🔥 {score}% (絶好機)"
+    elif score >= 65: return f"🔥 {score}% (買い時)"
+    elif score >= 40: return f"⭐ {score}% (中立)"
+    else: return f"❄️ {score}% (様子見)"
 
 def calculate_buy_timing_score(hist):
     try:
@@ -217,7 +242,6 @@ def fetch_and_save():
                 # 企業名取得
                 name = None
                 if is_japan_stock and jq_api_key:
-                    from app import get_jquants_company_name
                     name = get_jquants_company_name(jq_api_key, display_ticker)
                 
                 if not name:
