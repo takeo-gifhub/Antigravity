@@ -153,11 +153,20 @@ def get_earnings_date(stock):
         pass
     return "-"
 
+def get_jquants_api_key():
+    env_key = os.environ.get("JQUANTS_API_KEY", "")
+    if env_key:
+        return env_key
+    if os.path.exists("jquants_token.txt"):
+        with open("jquants_token.txt", "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return ""
+
 def fetch_and_save():
     """全ウォッチリストを取得してファイルに保存"""
     watchlists = load_watchlists()
     name_overrides = load_name_overrides()
-    jq_api_key = os.environ.get("JQUANTS_API_KEY", "")
+    jq_api_key = get_jquants_api_key()
     
     all_saved = {}
     if os.path.exists(LAST_DATA_FILE):

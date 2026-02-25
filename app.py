@@ -33,42 +33,79 @@ def save_watchlists(data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 def load_jquants_token():
-    # 優先順: st.secrets → 環境変数 → ローカルファイル
+    # 優先順: st.secrets → 環境変数 → セッション変数 → ローカルファイル
+    # (1) Streamlit Cloud Secrets（最優先・永続的）
     try:
-        return st.secrets["JQUANTS_API_KEY"]
+        key = st.secrets["JQUANTS_API_KEY"]
+        if key:
+            return key
     except Exception:
         pass
+    # (2) 環境変数（GitHub Actions等）
     env_key = os.environ.get("JQUANTS_API_KEY", "")
     if env_key:
         return env_key
+    # (3) セッション変数（サイドバーから入力 → Cloud上でもセッション中は有効）
+    session_key = st.session_state.get("jquants_api_key_session", "")
+    if session_key:
+        return session_key
+    # (4) ローカルファイル（ローカル環境用）
     if os.path.exists(JQUANTS_TOKEN_FILE):
         with open(JQUANTS_TOKEN_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
     return ""
 
-def save_jquants_token(token):
-    with open(JQUANTS_TOKEN_FILE, "w", encoding="utf-8") as f:
-        f.write(token)
+def _get_jquants_key_source():
+    """現在のAPIキーの取得元を返す（UI表示用）"""
+    try:
+        if st.secrets.get("JQUANTS_API_KEY"):
+            return "☁️ Streamlit Secrets"
+    except Exception:
+        pass
+    if os.environ.get("JQUANTS_API_KEY"):
+        return "🔧 環境変数"
+    if st.session_state.get("jquants_api_key_session"):
+        return "💬 サイドバー入力（セッション中のみ有効）"
+    if os.path.exists(JQUANTS_TOKEN_FILE):
+        with open(JQUANTS_TOKEN_FILE, "r", encoding="utf-8") as f:
+            if f.read().strip():
+                return "📁 ローカルファイル"
+    return None
 
-def get_jquants_company_name(api_key, code, retries=2):
+def save_jquants_token(token):
+    # セッション変数に保存（Cloud上でもセッション中は有効）
+    st.session_state["jquants_api_key_session"] = token
+    # ローカルファイルにも保存（ローカル環境用）
+    try:
+        with open(JQUANTS_TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(token)
+    except Exception:
+        pass  # Cloud上ではファイル書き込みに失敗しても問題ない
+
+def get_jquants_company_name(api_key, code, retries=3):
     # J-Quants V2 APIは5桁コード（末尾0追加）が必要
     jq_code = code + "0" if len(code) == 4 else code
     url = f"https://api.jquants.com/v2/equities/master?code={jq_code}"
     headers = {"x-api-key": api_key}
-    for _ in range(retries):
+    for attempt in range(retries):
         try:
-            res = requests.get(url, headers=headers)
+            res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
                 data = res.json().get("data", [])
                 if data:
-                    return data[-1].get("CompanyName") or data[-1].get("CoName")
+                    name = data[-1].get("CompanyName") or data[-1].get("CoName")
+                    if name:
+                        return name
             elif res.status_code == 429:
-                time.sleep(2.0)
+                wait = 3.0 * (attempt + 1)
+                print(f"  ⏳ J-Quants 429 レート制限 ({code}), {wait}秒待機...")
+                time.sleep(wait)
                 continue
             else:
+                print(f"  ⚠️ J-Quants {res.status_code} ({code})")
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  ⚠️ J-Quants 例外 ({code}): {e}")
     return None
 
 def load_name_overrides():
@@ -249,14 +286,6 @@ st.set_page_config(page_title="株価・企業情報収集ツール", layout="wi
 
 st.title("📈 株価・企業情報 収集ツール")
 
-with st.sidebar.expander("🔑 J-Quants API 設定", expanded=False):
-    st.markdown("日本取引所グループのV2 APIを利用して正確な日本語企業名を取得します。")
-    jquants_token_input = st.text_input("API Key (x-api-key)", value=load_jquants_token(), type="password")
-    if st.button("APIキーを保存"):
-        save_jquants_token(jquants_token_input)
-        st.success("APIキーを保存しました！")
-
-st.sidebar.markdown("---")
 
 watchlists = load_watchlists()
 watchlist_names = list(watchlists.keys())
@@ -347,10 +376,11 @@ def fetch_stock_data(tickers_input):
     if saved_jq_api_key:
         if "jq_key_valid" not in st.session_state or st.session_state.get("jq_key_cache") != saved_jq_api_key:
             try:
-                res_test = requests.get("https://api.jquants.com/v2/equities/master?code=72030", headers={"x-api-key": saved_jq_api_key})
+                res_test = requests.get("https://api.jquants.com/v2/equities/master?code=72030", headers={"x-api-key": saved_jq_api_key}, timeout=10)
                 if res_test.status_code in (401, 403):
                     st.session_state["jq_key_valid"] = False
                 else:
+                    # 200, 429 等はキー自体は有効（429はレート制限で一時的）
                     st.session_state["jq_key_valid"] = True
             except Exception:
                 st.session_state["jq_key_valid"] = False
@@ -386,20 +416,26 @@ def fetch_stock_data(tickers_input):
             stock = yf.Ticker(query_ticker)
             info = stock.info
             
-            # 企業名の取得（優先順: J-Quants → 手動修正辞書 → shortName → longName+翻訳）
+            # 企業名の取得（優先順: 手動修正辞書/キャッシュ → J-Quants → shortName → longName+翻訳）
             name = None
             name_from_cache = False
-            # 1. J-Quants API（最優先）
-            if is_japan_stock and saved_jq_api_key:
-                name = get_jquants_company_name(saved_jq_api_key, display_ticker)
             
-            # 2. 手動修正辞書（自動キャッシュ含む）
-            if not name:
-                name_overrides = load_name_overrides()
-                cached = name_overrides.get(display_ticker, None)
-                if cached:
-                    name = cached
-                    name_from_cache = True
+            # 1. 手動修正辞書 & 自動キャッシュ（最優先 - API不要で高速）
+            name_overrides = load_name_overrides()
+            cached = name_overrides.get(display_ticker, None)
+            if cached:
+                name = cached
+                name_from_cache = True
+            
+            # 2. J-Quants API（キャッシュにない日本株のみ呼ぶ）
+            if not name and is_japan_stock and saved_jq_api_key:
+                name = get_jquants_company_name(saved_jq_api_key, display_ticker)
+                if name:
+                    # 取得成功 → 自動キャッシュに保存（次回からAPI不要）
+                    name_overrides[display_ticker] = name
+                    save_name_overrides(name_overrides)
+                    print(f"  💾 キャッシュ保存: {display_ticker} → {name}")
+                    time.sleep(12)  # Freeプラン: 1分5回制限（12秒間隔）
             
             # 3. yfinance shortName（日本語を含む場合のみ採用）
             if not name and is_japan_stock:
@@ -1010,10 +1046,10 @@ if "stock_df" in st.session_state:
             def color_change(val):
                 if isinstance(val, str):
                     if "📈" in val:
-                        return "color: #4caf50; font-weight: bold"
+                        return "color: #66bb6a; font-weight: bold"
                     elif "📉" in val:
                         return "color: #ef5350; font-weight: bold"
-                return "color: #e0e0e0"
+                return ""
             
             for col in ["1W変動", "2W変動"]:
                 if col in styler.columns:
@@ -1024,54 +1060,60 @@ if "stock_df" in st.session_state:
         styled_df = show_df.style.pipe(style_table)
         table_html = styled_df.to_html(escape=False)
         
-        # ダークモード対応 CSS
+        # Pandasが生成するインラインスタイルのcolor指定を白に強制変換
+        # （CSSの!importantだけではStreamlit上で効かない場合があるため直接加工）
+        table_html = table_html.replace('color: #e0e0e0', 'color: #ffffff')
+        table_html = table_html.replace('color: #000000', 'color: #ffffff')
+        # td要素にstyle属性がない場合にも対応するため、全tdにcolor追加
+        table_html = table_html.replace('<td ', '<td style="color:#ffffff;" ')
+        table_html = table_html.replace('<th ', '<th style="color:#ffffff;" ')
+        # 変動列の色は保持（上で追加したstyleの後にPandasのstyleが来るのでOK）
+        
+        # テーブル表示用CSS
         st.markdown("""
         <style>
         .stock-table-wrapper table {
             width: 100%;
             border-collapse: collapse;
             font-size: 0.85em;
-            color: #e0e0e0 !important;
         }
         .stock-table-wrapper th {
-            background-color: #1a1a2e !important;
-            color: #ffffff !important;
-            padding: 6px 8px;
+            background-color: #1e2a3a;
+            padding: 8px 10px;
             text-align: center;
             white-space: nowrap;
             position: sticky;
             top: 0;
-            border-bottom: 2px solid #444;
-            font-weight: 600;
+            border-bottom: 2px solid #4a6fa5;
+            font-weight: 700;
+            font-size: 0.9em;
         }
         .stock-table-wrapper td {
-            padding: 5px 8px;
+            padding: 6px 10px;
             text-align: center;
             white-space: nowrap;
-            border-bottom: 1px solid #333;
-            color: #e0e0e0 !important;
-            background-color: #0e1117 !important;
+            border-bottom: 1px solid #2a2a3a;
+            background-color: #131722;
         }
         /* 買い時率 現在（緑系） */
-        .stock-table-wrapper td[style*="background-color: var(--bg-current)"],
         .stock-table-wrapper tr td:nth-child(6),
         .stock-table-wrapper tr td:nth-child(7) {
-            background-color: #1b3d1f !important;
+            background-color: #1a3a22;
         }
         /* 1W前（青系） */
         .stock-table-wrapper tr td:nth-child(8),
         .stock-table-wrapper tr td:nth-child(9),
         .stock-table-wrapper tr td:nth-child(10) {
-            background-color: #162d3e !important;
+            background-color: #1a2a40;
         }
         /* 2W前（紫系） */
         .stock-table-wrapper tr td:nth-child(11),
         .stock-table-wrapper tr td:nth-child(12),
         .stock-table-wrapper tr td:nth-child(13) {
-            background-color: #2d1b3d !important;
+            background-color: #2a1a3a;
         }
         .stock-table-wrapper tr:hover td {
-            filter: brightness(1.2) !important;
+            filter: brightness(1.25);
         }
         .stock-table-wrapper a {
             text-decoration: none;
@@ -1081,10 +1123,6 @@ if "stock_df" in st.session_state:
         .stock-table-wrapper a:hover {
             transform: scale(1.3);
             display: inline-block;
-        }
-        /* Pandasが生成するインラインcolorを上書き */
-        .stock-table-wrapper td[style] {
-            color: #e0e0e0 !important;
         }
         </style>
         """, unsafe_allow_html=True)
