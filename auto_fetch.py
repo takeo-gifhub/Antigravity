@@ -106,8 +106,10 @@ def calculate_buy_timing_score(hist, raw=False):
     except Exception:
         return (0, None) if raw else (None, None)
 
-def calculate_buy_timing_score_v2(hist):
+def calculate_buy_timing_score_v2(hist, raw=False):
     try:
+        if hist.empty:
+            return ("-", None) if not raw else (0, None)
         close = hist['Close']
         volume = hist['Volume']
         c_price = float(close.iloc[-1])
@@ -137,29 +139,29 @@ def calculate_buy_timing_score_v2(hist):
         lower_band = (sma20 - 2 * std20).iloc[-1]
         upper_band = (sma20 + 2 * std20).iloc[-1]
         
-        raw = 0
-        if c_price > ema20: raw += 20
-        elif c_price > ema20 * 0.98: raw += 10
-        if c_price <= vwap * 1.02: raw += 20
-        elif c_price <= vwap * 1.05: raw += 10
-        if rvol >= 1.5: raw += 20
-        elif rvol >= 1.0: raw += 10
-        if macd.iloc[-1] > signal.iloc[-1]: raw += 20
-        elif macd.iloc[-1] > macd.iloc[-2]: raw += 10
-        if 1 <= pullback <= 5: raw += 20
-        elif pullback < 1: raw += 10
-        if 30 <= rsi <= 50: raw += 20
-        elif 25 <= rsi < 30 or 50 < rsi <= 60: raw += 10
+        raw_score = 0
+        if c_price > ema20: raw_score += 20
+        elif c_price > ema20 * 0.98: raw_score += 10
+        if c_price <= vwap * 1.02: raw_score += 20
+        elif c_price <= vwap * 1.05: raw_score += 10
+        if rvol >= 1.5: raw_score += 20
+        elif rvol >= 1.0: raw_score += 10
+        if macd.iloc[-1] > signal.iloc[-1]: raw_score += 20
+        elif macd.iloc[-1] > macd.iloc[-2]: raw_score += 10
+        if 1 <= pullback <= 5: raw_score += 20
+        elif pullback < 1: raw_score += 10
+        if 30 <= rsi <= 50: raw_score += 20
+        elif 25 <= rsi < 30 or 50 < rsi <= 60: raw_score += 10
         bb_range = upper_band - lower_band
         if bb_range > 0:
             bb_pos = (c_price - lower_band) / bb_range
-            if bb_pos <= 0.2: raw += 20
-            elif bb_pos <= 0.4: raw += 10
+            if bb_pos <= 0.2: raw_score += 20
+            elif bb_pos <= 0.4: raw_score += 10
         
-        score = round(raw / 140 * 100)
-        return _score_to_label(score), c_price
+        score = round(raw_score / 140 * 100)
+        return (score, c_price) if raw else (_score_to_label(score), c_price)
     except Exception:
-        return None, None
+        return ("-", None) if not raw else (0, None)
 
 def get_earnings_date(stock):
     try:
@@ -293,12 +295,6 @@ def fetch_and_save():
                 predicted_trend = "-"
                 buy_timing_rate = "-"
                 buy_timing_v2 = "-"
-                buy_timing_1w = "-"
-                price_1w = "-"
-                chg_1w = "-"
-                buy_timing_2w = "-"
-                price_2w = "-"
-                chg_2w = "-"
                 
                 hist = stock.history(period="1y")
                 if not hist.empty and raw_price is not None:
@@ -315,24 +311,6 @@ def fetch_and_save():
                     if rate_now: buy_timing_rate = rate_now
                     rate_v2, _ = calculate_buy_timing_score_v2(hist)
                     if rate_v2: buy_timing_v2 = rate_v2
-                    
-                    if len(hist) > 5:
-                        hist_1w = hist.iloc[:-5]
-                        rate_1w, p_1w = calculate_buy_timing_score(hist_1w)
-                        if rate_1w: buy_timing_1w = rate_1w
-                        if p_1w:
-                            price_1w = f"{p_1w:,.0f}" if p_1w >= 100 else f"{p_1w:,.2f}"
-                            pct_chg = (c_price - p_1w) / p_1w * 100
-                            chg_1w = f"📈 +{pct_chg:.2f}%" if pct_chg >= 0 else f"📉 {pct_chg:.2f}%"
-                    
-                    if len(hist) > 10:
-                        hist_2w = hist.iloc[:-10]
-                        rate_2w, p_2w = calculate_buy_timing_score(hist_2w)
-                        if rate_2w: buy_timing_2w = rate_2w
-                        if p_2w:
-                            price_2w = f"{p_2w:,.0f}" if p_2w >= 100 else f"{p_2w:,.2f}"
-                            pct_chg = (c_price - p_2w) / p_2w * 100
-                            chg_2w = f"📈 +{pct_chg:.2f}%" if pct_chg >= 0 else f"📉 {pct_chg:.2f}%"
                 
                 # 出来高
                 volume_str = "-"
@@ -369,6 +347,7 @@ def fetch_and_save():
                 
                 chart_svg = ""
                 v1_chart_svg = ""
+                v2_chart_svg = ""
                 try:
                     if not hist.empty and len(hist) >= 40:
                         # --- 株価チャート ---
@@ -382,7 +361,7 @@ def fetch_and_save():
                                 x = idx * (width / 19)
                                 y = height - ((val - min_val) / (max_val - min_val) * height)
                                 svg_pts.append(f"{x:.1f},{y:.1f}")
-                            color = "#c62828" if hist_20.iloc[-1] < hist_20.iloc[0] else "#2e7d32"
+                            color = "#4caf50" if hist_20.iloc[-1] >= hist_20.iloc[0] else "#ff5252"
                             pts_str = " ".join(svg_pts)
                             chart_svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"><polyline points="{pts_str}" fill="none" stroke="{color}" stroke-width="1.5"/></svg>'
                         
@@ -400,10 +379,27 @@ def fetch_and_save():
                             y = height - ((val - min_score) / (max_score - min_score) * height)
                             svg_pts_v1.append(f"{x:.1f},{y:.1f}")
                         
-                        v1_color = "#c62828" if scores_20[-1] < scores_20[0] else "#2e7d32"
+                        v1_color = "#ff5252" if scores_20[-1] < scores_20[0] else "#4caf50"
                         pts_str_v1 = " ".join(svg_pts_v1)
                         line_50 = f'<line x1="0" y1="{height/2}" x2="{width}" y2="{height/2}" stroke="#666666" stroke-width="1" stroke-dasharray="2,2"/>'
                         v1_chart_svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v1}" fill="none" stroke="{v1_color}" stroke-width="1.5"/></svg>'
+                        
+                        # --- V2推移チャート ---
+                        scores_20_v2 = []
+                        for i in range(20, 0, -1):
+                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
+                            score, _ = calculate_buy_timing_score_v2(sub_hist, raw=True)
+                            scores_20_v2.append(score if score is not None and score != "-" else 0)
+                        
+                        svg_pts_v2 = []
+                        for idx, val in enumerate(scores_20_v2):
+                            x = idx * (width / 19)
+                            y = height - ((val - min_score) / (max_score - min_score) * height)
+                            svg_pts_v2.append(f"{x:.1f},{y:.1f}")
+                        
+                        v2_color = "#ff5252" if scores_20_v2[-1] < scores_20_v2[0] else "#4caf50"
+                        pts_str_v2 = " ".join(svg_pts_v2)
+                        v2_chart_svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v2}" fill="none" stroke="{v2_color}" stroke-width="1.5"/></svg>'
                 except Exception:
                     pass
                 
@@ -414,14 +410,9 @@ def fetch_and_save():
                     "現在株価": current_price,
                     "チャート": chart_svg,
                     "V1トレンド": v1_chart_svg,
+                    "V2トレンド": v2_chart_svg,
                     "買い時率V1": buy_timing_rate,
                     "買い時率V2": buy_timing_v2,
-                    "1W前買い時率": buy_timing_1w,
-                    "1W前株価": price_1w,
-                    "1W変動": chg_1w,
-                    "2W前買い時率": buy_timing_2w,
-                    "2W前株価": price_2w,
-                    "2W変動": chg_2w,
                     "1か月後予想株価": predicted_trend,
                     "出来高": volume_str,
                     "平均出来高": avg_volume_str,

@@ -199,11 +199,11 @@ def calculate_buy_timing_score(hist, raw=False):
     except Exception:
         return ("-", None) if not raw else (0, None)
 
-def calculate_buy_timing_score_v2(hist):
+def calculate_buy_timing_score_v2(hist, raw=False):
     """V2: V1の5指標 + RSI + ボリンジャーバンド (最大100点に正規化)"""
     try:
         if hist.empty:
-            return "-", None
+            return ("-", None) if not raw else (0, None)
         c_price = float(hist['Close'].iloc[-1])
         score = 0
         max_score = 0
@@ -276,9 +276,9 @@ def calculate_buy_timing_score_v2(hist):
         
         # スコアを100点満点に正規化
         normalized = int(score / max_score * 100) if max_score > 0 else 0
-        return _score_to_label(normalized), c_price
+        return (normalized, c_price) if raw else (_score_to_label(normalized), c_price)
     except Exception:
-        return "-", None
+        return ("-", None) if not raw else (0, None)
 
 warnings.filterwarnings('ignore')
 
@@ -490,12 +490,6 @@ def fetch_stock_data(tickers_input):
             predicted_trend = "-"
             buy_timing_rate = "-"
             buy_timing_v2 = "-"
-            buy_timing_1w = "-"
-            price_1w = "-"
-            chg_1w = "-"
-            buy_timing_2w = "-"
-            price_2w = "-"
-            chg_2w = "-"
             
             try:
                 hist = stock.history(period="1y")
@@ -513,32 +507,12 @@ def fetch_stock_data(tickers_input):
                     else:
                         predicted_trend = f"📉 {predicted_price:.2f} ({estimated_1mo_return*100:.2f}%)"
                     
-                    # -- 買い時率の計算 (現在、1週間前、2週間前) --
+                    # -- 買い時率の計算 --
                     rate_now, _ = calculate_buy_timing_score(hist)
                     if rate_now: buy_timing_rate = rate_now
                     
                     rate_v2, _ = calculate_buy_timing_score_v2(hist)
                     if rate_v2: buy_timing_v2 = rate_v2
-                    
-                    # 1週間前 (約5営業日前) の計算
-                    if len(hist) > 5:
-                        hist_1w = hist.iloc[:-5]
-                        rate_1w, p_1w = calculate_buy_timing_score(hist_1w)
-                        if rate_1w: buy_timing_1w = rate_1w
-                        if p_1w:
-                            price_1w = f"{p_1w:,.0f}" if p_1w >= 100 else f"{p_1w:,.2f}"
-                            pct_chg = (c_price - p_1w) / p_1w * 100
-                            chg_1w = f"📈 +{pct_chg:.2f}%" if pct_chg >= 0 else f"📉 {pct_chg:.2f}%"
-                    
-                    # 2週間前 (約10営業日前) の計算
-                    if len(hist) > 10:
-                        hist_2w = hist.iloc[:-10]
-                        rate_2w, p_2w = calculate_buy_timing_score(hist_2w)
-                        if rate_2w: buy_timing_2w = rate_2w
-                        if p_2w:
-                            price_2w = f"{p_2w:,.0f}" if p_2w >= 100 else f"{p_2w:,.2f}"
-                            pct_chg = (c_price - p_2w) / p_2w * 100
-                            chg_2w = f"📈 +{pct_chg:.2f}%" if pct_chg >= 0 else f"📉 {pct_chg:.2f}%"
                     
             except Exception:
                 pass
@@ -583,14 +557,9 @@ def fetch_stock_data(tickers_input):
                 "現在株価": current_price,
                 "チャート": "",  # 後でSVGをセット
                 "V1トレンド": "",  
+                "V2トレンド": "",
                 "買い時率V1": buy_timing_rate,
                 "買い時率V2": buy_timing_v2,
-                "1W前買い時率": buy_timing_1w,
-                "1W前株価": price_1w,
-                "1W変動": chg_1w,
-                "2W前買い時率": buy_timing_2w,
-                "2W前株価": price_2w,
-                "2W変動": chg_2w,
                 "1か月後予想株価": predicted_trend,
                 "出来高": volume_str,
                 "平均出来高": avg_volume_str,
@@ -615,7 +584,7 @@ def fetch_stock_data(tickers_input):
                             x = j / (len(recent) - 1) * w
                             y = h - (v - mn) / rng * h
                             points.append(f"{x:.1f},{y:.1f}")
-                        color = "#2e7d32" if recent[-1] >= recent[0] else "#c62828"
+                        color = "#4caf50" if recent[-1] >= recent[0] else "#ff5252"
                         svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg"><polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="1.5"/></svg>'
                         data["チャート"] = svg
                     
@@ -635,11 +604,32 @@ def fetch_stock_data(tickers_input):
                             y = h - ((val - min_score) / (max_score - min_score) * h)
                             svg_pts_v1.append(f"{x:.1f},{y:.1f}")
                         
-                        v1_color = "#c62828" if scores_20[-1] < scores_20[0] else "#2e7d32"
+                        v1_color = "#ff5252" if scores_20[-1] < scores_20[0] else "#4caf50"
                         pts_str_v1 = " ".join(svg_pts_v1)
                         line_50 = f'<line x1="0" y1="{h/2}" x2="{w}" y2="{h/2}" stroke="#666666" stroke-width="1" stroke-dasharray="2,2"/>'
                         v1_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v1}" fill="none" stroke="{v1_color}" stroke-width="1.5"/></svg>'
                         data["V1トレンド"] = v1_svg
+                        
+                    # V2推移チャート用SVGを生成
+                    if len(hist) >= 40:
+                        scores_20_v2 = []
+                        for i in range(20, 0, -1):
+                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
+                            score, _ = calculate_buy_timing_score_v2(sub_hist, raw=True)
+                            scores_20_v2.append(score if score is not None and score != "-" else 0)
+                        
+                        min_score, max_score = 0, 100
+                        svg_pts_v2 = []
+                        w, h = 80, 24
+                        for idx, val in enumerate(scores_20_v2):
+                            x = idx * (w / 19)
+                            y = h - ((val - min_score) / (max_score - min_score) * h)
+                            svg_pts_v2.append(f"{x:.1f},{y:.1f}")
+                        
+                        v2_color = "#ff5252" if scores_20_v2[-1] < scores_20_v2[0] else "#4caf50"
+                        pts_str_v2 = " ".join(svg_pts_v2)
+                        v2_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v2}" fill="none" stroke="{v2_color}" stroke-width="1.5"/></svg>'
+                        data["V2トレンド"] = v2_svg
                         
             except Exception:
                 pass
@@ -1027,20 +1017,9 @@ if "stock_df" in st.session_state:
         elif "買い時率V1" in sort_option and "_score_v1" in display_df.columns:
             asc = "⬆" in sort_option
             display_df = display_df.sort_values("_score_v1", ascending=asc)
-        elif "1W変動" in sort_option:
-            def extract_pct(val):
-                try:
-                    m = re.search(r'([+-]?[\d.]+)%', str(val))
-                    return float(m.group(1)) if m else 0
-                except Exception:
-                    return 0
-            display_df["_chg_1w_num"] = display_df["1W変動"].apply(extract_pct)
-            asc = "⬆" in sort_option
-            display_df = display_df.sort_values("_chg_1w_num", ascending=asc)
-            display_df = display_df.drop(columns=["_chg_1w_num"])
     
     # --- 列表示切替 ---
-    simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "V1トレンド", "買い時率V1", "買い時率V2", "1W変動", "配当利回り"]
+    simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "V1トレンド", "V2トレンド", "買い時率V1", "買い時率V2", "配当利回り"]
     if view_mode == "簡易表示":
         cols_to_show = [c for c in simple_cols if c in display_df.columns]
     else:
@@ -1054,31 +1033,9 @@ if "stock_df" in st.session_state:
         # --- 色分けスタイルを適用 ---
         def style_table(styler):
             current_cols = ["現在株価", "買い時率V1", "買い時率V2"]
-            w1_cols = ["1W前買い時率", "1W前株価", "1W変動"]
-            w2_cols = ["2W前買い時率", "2W前株価", "2W変動"]
-            
             for col in current_cols:
                 if col in styler.columns:
-                    styler = styler.set_properties(subset=[col], **{"background-color": "var(--bg-current)"})
-            for col in w1_cols:
-                if col in styler.columns:
-                    styler = styler.set_properties(subset=[col], **{"background-color": "var(--bg-1w)"})
-            for col in w2_cols:
-                if col in styler.columns:
-                    styler = styler.set_properties(subset=[col], **{"background-color": "var(--bg-2w)"})
-            
-            def color_change(val):
-                if isinstance(val, str):
-                    if "📈" in val:
-                        return "color: #66bb6a; font-weight: bold"
-                    elif "📉" in val:
-                        return "color: #ef5350; font-weight: bold"
-                return ""
-            
-            for col in ["1W変動", "2W変動"]:
-                if col in styler.columns:
-                    styler = styler.map(color_change, subset=[col])
-            
+                    styler = styler.set_properties(subset=[col], **{"background-color": "#1a3a22"})
             return styler
         
         styled_df = show_df.style.pipe(style_table)
@@ -1119,23 +1076,7 @@ if "stock_df" in st.session_state:
             border-bottom: 1px solid #2a2a3a;
             background-color: #131722;
         }
-        /* 買い時率 現在（緑系） */
-        .stock-table-wrapper tr td:nth-child(6),
-        .stock-table-wrapper tr td:nth-child(7) {
-            background-color: #1a3a22;
-        }
-        /* 1W前（青系） */
-        .stock-table-wrapper tr td:nth-child(8),
-        .stock-table-wrapper tr td:nth-child(9),
-        .stock-table-wrapper tr td:nth-child(10) {
-            background-color: #1a2a40;
-        }
-        /* 2W前（紫系） */
-        .stock-table-wrapper tr td:nth-child(11),
-        .stock-table-wrapper tr td:nth-child(12),
-        .stock-table-wrapper tr td:nth-child(13) {
-            background-color: #2a1a3a;
-        }
+        /* 買い時率 現在（緑系）、1W前（青系）、2W前（紫系）の背景色はPandas Stylerで指定しています */
         .stock-table-wrapper tr:hover td {
             filter: brightness(1.25);
         }
@@ -1175,6 +1116,8 @@ if "stock_df" in st.session_state:
         df_csv = df_csv.drop(columns=["チャート"])
     if "V1トレンド" in df_csv.columns:
         df_csv = df_csv.drop(columns=["V1トレンド"])
+    if "V2トレンド" in df_csv.columns:
+        df_csv = df_csv.drop(columns=["V2トレンド"])
     csv = df_csv.to_csv(index=False).encode('utf-8-sig')
     
     st.download_button(
