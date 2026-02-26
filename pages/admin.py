@@ -38,9 +38,10 @@ if os.path.exists(LAST_DATA_FILE):
             all_saved = json.load(f)
         
         for wl_name, wl_data in all_saved.items():
-            fetch_time = wl_data.get("fetch_time", "不明")
-            data = wl_data.get("data", [])
-            st.success(f"📂 **{wl_name}** — 最終取得: {fetch_time} （{len(data)}銘柄）")
+            if isinstance(wl_data, dict):
+                fetch_time = wl_data.get("fetch_time", "不明")
+                data = wl_data.get("data", [])
+                st.success(f"📂 **{wl_name}** — 最終取得: {fetch_time} （{len(data)}銘柄）")
     except Exception:
         st.warning("データファイルの読み込みに失敗しました")
 else:
