@@ -70,7 +70,7 @@ def _score_to_label(score):
     elif score >= 40: return f"⭐ {score}% (中立)"
     else: return f"❄️ {score}% (様子見)"
 
-def calculate_buy_timing_score(hist):
+def calculate_buy_timing_score(hist, raw=False):
     try:
         close = hist['Close']
         volume = hist['Volume']
@@ -102,9 +102,9 @@ def calculate_buy_timing_score(hist):
         if 1 <= pullback <= 5: score += 20
         elif pullback < 1: score += 10
         
-        return _score_to_label(score), c_price
+        return (score, c_price) if raw else (_score_to_label(score), c_price)
     except Exception:
-        return None, None
+        return (0, None) if raw else (None, None)
 
 def calculate_buy_timing_score_v2(hist):
     try:
@@ -368,8 +368,10 @@ def fetch_and_save():
                     links_html = f'<a href="https://finance.yahoo.com/quote/{query_ticker}" target="_blank" title="Yahoo Finance">🌐</a>'
                 
                 chart_svg = ""
+                v1_chart_svg = ""
                 try:
-                    if not hist.empty and len(hist) >= 20:
+                    if not hist.empty and len(hist) >= 40:
+                        # --- 株価チャート ---
                         hist_20 = hist['Close'].tail(20)
                         min_val = hist_20.min()
                         max_val = hist_20.max()
@@ -383,6 +385,25 @@ def fetch_and_save():
                             color = "#c62828" if hist_20.iloc[-1] < hist_20.iloc[0] else "#2e7d32"
                             pts_str = " ".join(svg_pts)
                             chart_svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"><polyline points="{pts_str}" fill="none" stroke="{color}" stroke-width="1.5"/></svg>'
+                        
+                        # --- V1推移チャート ---
+                        scores_20 = []
+                        for i in range(20, 0, -1):
+                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
+                            score, _ = calculate_buy_timing_score(sub_hist, raw=True)
+                            scores_20.append(score if score is not None and score != "-" else 0)
+                        
+                        min_score, max_score = 0, 100
+                        svg_pts_v1 = []
+                        for idx, val in enumerate(scores_20):
+                            x = idx * (width / 19)
+                            y = height - ((val - min_score) / (max_score - min_score) * height)
+                            svg_pts_v1.append(f"{x:.1f},{y:.1f}")
+                        
+                        v1_color = "#c62828" if scores_20[-1] < scores_20[0] else "#2e7d32"
+                        pts_str_v1 = " ".join(svg_pts_v1)
+                        line_50 = f'<line x1="0" y1="{height/2}" x2="{width}" y2="{height/2}" stroke="#666666" stroke-width="1" stroke-dasharray="2,2"/>'
+                        v1_chart_svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v1}" fill="none" stroke="{v1_color}" stroke-width="1.5"/></svg>'
                 except Exception:
                     pass
                 
@@ -392,6 +413,7 @@ def fetch_and_save():
                     "リンク": links_html,
                     "現在株価": current_price,
                     "チャート": chart_svg,
+                    "V1トレンド": v1_chart_svg,
                     "買い時率V1": buy_timing_rate,
                     "買い時率V2": buy_timing_v2,
                     "1W前買い時率": buy_timing_1w,

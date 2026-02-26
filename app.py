@@ -155,11 +155,11 @@ def _score_to_label(score):
     else:
         return f"❄️ {score}% (様子見)"
 
-def calculate_buy_timing_score(hist):
+def calculate_buy_timing_score(hist, raw=False):
     """V1: EMA + VWAP + RVOL + MACD + マイクロプルバック (最大100点)"""
     try:
         if hist.empty:
-            return "-", None
+            return ("-", None) if not raw else (0, None)
         c_price = float(hist['Close'].iloc[-1])
         score = 0
         
@@ -195,9 +195,9 @@ def calculate_buy_timing_score(hist):
             prev_high = hist['High'].iloc[-2]
             if c_price > prev_high: score += 15
             
-        return _score_to_label(score), c_price
+        return (score, c_price) if raw else (_score_to_label(score), c_price)
     except Exception:
-        return "-", None
+        return ("-", None) if not raw else (0, None)
 
 def calculate_buy_timing_score_v2(hist):
     """V2: V1の5指標 + RSI + ボリンジャーバンド (最大100点に正規化)"""
@@ -582,6 +582,7 @@ def fetch_stock_data(tickers_input):
                 "リンク": links_html,
                 "現在株価": current_price,
                 "チャート": "",  # 後でSVGをセット
+                "V1トレンド": "",  
                 "買い時率V1": buy_timing_rate,
                 "買い時率V2": buy_timing_v2,
                 "1W前買い時率": buy_timing_1w,
@@ -617,6 +618,29 @@ def fetch_stock_data(tickers_input):
                         color = "#2e7d32" if recent[-1] >= recent[0] else "#c62828"
                         svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg"><polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="1.5"/></svg>'
                         data["チャート"] = svg
+                    
+                    # V1推移チャート用SVGを生成
+                    if len(hist) >= 40:
+                        scores_20 = []
+                        for i in range(20, 0, -1):
+                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
+                            score, _ = calculate_buy_timing_score(sub_hist, raw=True)
+                            scores_20.append(score if score is not None and score != "-" else 0)
+                        
+                        min_score, max_score = 0, 100
+                        svg_pts_v1 = []
+                        w, h = 80, 24
+                        for idx, val in enumerate(scores_20):
+                            x = idx * (w / 19)
+                            y = h - ((val - min_score) / (max_score - min_score) * h)
+                            svg_pts_v1.append(f"{x:.1f},{y:.1f}")
+                        
+                        v1_color = "#c62828" if scores_20[-1] < scores_20[0] else "#2e7d32"
+                        pts_str_v1 = " ".join(svg_pts_v1)
+                        line_50 = f'<line x1="0" y1="{h/2}" x2="{w}" y2="{h/2}" stroke="#666666" stroke-width="1" stroke-dasharray="2,2"/>'
+                        v1_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v1}" fill="none" stroke="{v1_color}" stroke-width="1.5"/></svg>'
+                        data["V1トレンド"] = v1_svg
+                        
             except Exception:
                 pass
             # ソート/フィルタ用のスコア数値を抽出
@@ -1016,7 +1040,7 @@ if "stock_df" in st.session_state:
             display_df = display_df.drop(columns=["_chg_1w_num"])
     
     # --- 列表示切替 ---
-    simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "買い時率V2", "1W変動", "配当利回り"]
+    simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "V1トレンド", "買い時率V1", "買い時率V2", "1W変動", "配当利回り"]
     if view_mode == "簡易表示":
         cols_to_show = [c for c in simple_cols if c in display_df.columns]
     else:
@@ -1149,6 +1173,8 @@ if "stock_df" in st.session_state:
         df_csv["リンク"] = df_csv["リンク"].str.replace(r'<[^>]+>', '', regex=True)
     if "チャート" in df_csv.columns:
         df_csv = df_csv.drop(columns=["チャート"])
+    if "V1トレンド" in df_csv.columns:
+        df_csv = df_csv.drop(columns=["V1トレンド"])
     csv = df_csv.to_csv(index=False).encode('utf-8-sig')
     
     st.download_button(
