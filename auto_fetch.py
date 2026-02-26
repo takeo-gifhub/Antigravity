@@ -357,12 +357,41 @@ def fetch_and_save():
                 except Exception:
                     pass
                 
+                if is_japan_stock:
+                    links_html = (
+                        f'<a href="https://shikiho.toyokeizai.net/stocks/{display_ticker}" target="_blank" title="四季報">📘</a> '
+                        f'<a href="https://minkabu.jp/stock/{display_ticker}" target="_blank" title="みんかぶ">📗</a> '
+                        f'<a href="https://kabutan.jp/stock/?code={display_ticker}" target="_blank" title="かぶたん">📙</a> '
+                        f'<a href="https://www.buffett-code.com/company/{display_ticker}/" target="_blank" title="バフェットコード">📕</a>'
+                    )
+                else:
+                    links_html = f'<a href="https://finance.yahoo.com/quote/{query_ticker}" target="_blank" title="Yahoo Finance">🌐</a>'
+                
+                chart_svg = ""
+                try:
+                    if not hist.empty and len(hist) >= 20:
+                        hist_20 = hist['Close'].tail(20)
+                        min_val = hist_20.min()
+                        max_val = hist_20.max()
+                        width, height = 80, 24
+                        svg_pts = []
+                        if max_val > min_val:
+                            for idx, val in enumerate(hist_20):
+                                x = idx * (width / 19)
+                                y = height - ((val - min_val) / (max_val - min_val) * height)
+                                svg_pts.append(f"{x:.1f},{y:.1f}")
+                            color = "#c62828" if hist_20.iloc[-1] < hist_20.iloc[0] else "#2e7d32"
+                            pts_str = " ".join(svg_pts)
+                            chart_svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"><polyline points="{pts_str}" fill="none" stroke="{color}" stroke-width="1.5"/></svg>'
+                except Exception:
+                    pass
+                
                 data = {
                     "銘柄コード": display_ticker,
                     "企業名": name,
-                    "リンク": "",
+                    "リンク": links_html,
                     "現在株価": current_price,
-                    "チャート": "",
+                    "チャート": chart_svg,
                     "買い時率V1": buy_timing_rate,
                     "買い時率V2": buy_timing_v2,
                     "1W前買い時率": buy_timing_1w,
