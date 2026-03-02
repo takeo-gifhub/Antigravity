@@ -1,0 +1,42 @@
+{
+    "デフォルト": {
+        "opt_mode": "個別銘柄 (単一)",
+        "watchlist": null,
+        "ticker": "4506 (住友ファーマ)",
+        "period": "1y",
+        "trend_type": "V2 トレンド",
+        "initial_cap": 1000000,
+        "buy_start": 50,
+        "buy_end": 80,
+        "buy_step": 5,
+        "sell_start": 10,
+        "sell_end": 40,
+        "sell_step": 5,
+        "tp_start": 5,
+        "tp_end": 500,
+        "tp_step": 5,
+        "sl_start": -10,
+        "sl_end": -1,
+        "sl_step": 1
+    },
+    "損切なし": {
+        "opt_mode": "個別銘柄 (単一)",
+        "watchlist": null,
+        "ticker": "4506 (住友ファーマ)",
+        "period": "1y",
+        "trend_type": "V2 トレンド",
+        "initial_cap": 1000000,
+        "buy_start": 50,
+        "buy_end": 80,
+        "buy_step": 5,
+        "sell_start": 10,
+        "sell_end": 40,
+        "sell_step": 5,
+        "tp_start": 5,
+        "tp_end": 500,
+        "tp_step": 5,
+        "sl_start": -100,
+        "sl_end": -100,
+        "sl_step": 1
+    }
+}

@@ -337,13 +337,13 @@ def fetch_and_save():
                 
                 if is_japan_stock:
                     links_html = (
-                        f'<a href="https://shikiho.toyokeizai.net/stocks/{display_ticker}" target="_blank" title="四季報">📘</a> '
-                        f'<a href="https://minkabu.jp/stock/{display_ticker}" target="_blank" title="みんかぶ">📗</a> '
-                        f'<a href="https://kabutan.jp/stock/?code={display_ticker}" target="_blank" title="かぶたん">📙</a> '
-                        f'<a href="https://www.buffett-code.com/company/{display_ticker}/" target="_blank" title="バフェットコード">📕</a>'
+                        f'<a href="https://shikiho.toyokeizai.net/stocks/{display_ticker}" target="_blank" rel="noopener noreferrer" title="四季報">📘</a> '
+                        f'<a href="https://minkabu.jp/stock/{display_ticker}" target="_blank" rel="noopener noreferrer" title="みんかぶ">📗</a> '
+                        f'<a href="https://kabutan.jp/stock/?code={display_ticker}" target="_blank" rel="noopener noreferrer" title="かぶたん">📙</a> '
+                        f'<a href="https://www.buffett-code.com/company/{display_ticker}/" target="_blank" rel="noopener noreferrer" title="バフェットコード">📕</a>'
                     )
                 else:
-                    links_html = f'<a href="https://finance.yahoo.com/quote/{query_ticker}" target="_blank" title="Yahoo Finance">🌐</a>'
+                    links_html = f'<a href="https://finance.yahoo.com/quote/{query_ticker}" target="_blank" rel="noopener noreferrer" title="Yahoo Finance">🌐</a>'
                 
                 chart_svg = ""
                 v1_chart_svg = ""

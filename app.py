@@ -280,9 +280,189 @@ def calculate_buy_timing_score_v2(hist, raw=False):
     except Exception:
         return ("-", None) if not raw else (0, None)
 
+def calculate_buy_timing_score_v3(hist, raw=False):
+    """V3: マルチタイム・ボラティリティ適応・過熱感排除型の高度ロジック (最大100点)"""
+    try:
+        import numpy as np
+        if hist.empty or len(hist) < 30:
+            return ("-", None) if not raw else (0, None)
+            
+        c_price = float(hist['Close'].iloc[-1])
+        score = 0
+        max_score = 100 # 固定100点満点で配分
+        
+        # 準備: 基本指標の計算
+        close_series = hist['Close']
+        high_series = hist['High']
+        low_series = hist['Low']
+        vol_series = hist['Volume']
+        
+        # --- 1. 過熱感フィルター (RSI) ---
+        # 買われすぎ状態なら問答無用でスコア上限を制限または0にする
+        delta = close_series.diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
+        rsi = 100 - (100 / (1 + gain/loss)) if loss != 0 else 100
+        
+        if rsi >= 80:
+            # 極端な過熱感: リスクが大きすぎるため0点
+            return (0, c_price) if raw else (_score_to_label(0), c_price)
+
+        # --- 2. マルチタイムフレーム分析 (疑似週足トレンド) [配分: 20点] ---
+        # 短期が良くても長期が下落していれば点数を下げる
+        if len(hist) >= 100:
+            # 20日移動平均(約1ヶ月)、60日移動平均(約3ヶ月)
+            sma20 = close_series.rolling(20).mean().iloc[-1]
+            sma60 = close_series.rolling(60).mean().iloc[-1]
+            if sma20 > sma60:
+                score += 20  # 長期上昇トレンド
+            elif c_price > sma60:
+                score += 10  # トレンド転換の初動の可能性
+            else:
+                score += 0   # 長期下落トレンド（加点なし）
+        else:
+            score += 10 # データ不足の場合は中間点
+            
+        # --- 3. ボラティリティ適応型押し目判定 (ATR考慮) [配分: 25点] ---
+        # 値動きが激しい時は、浅い押し目（下落）では買わない
+        atr_period = 14
+        tr1 = high_series - low_series
+        tr2 = (high_series - close_series.shift()).abs()
+        tr3 = (low_series - close_series.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(atr_period).mean().iloc[-1]
+        
+        recent_high = high_series.iloc[-10:].max() # 直近10日の高値
+        drawdown = recent_high - c_price
+        
+        if atr > 0:
+            dd_atr_ratio = drawdown / atr
+            # ボラティリティ(ATR)に対してどの程度調整したか
+            if dd_atr_ratio >= 1.5:
+                # 少し深めの押し目（ATR1.5倍以上の下落）
+                score += 25
+            elif dd_atr_ratio >= 0.5:
+                # 浅い押し目
+                score += 15
+            else:
+                # 押し目が無いに等しい（高値圏）
+                score += 5
+                
+        # --- 4. RVOL (相対出来高) [配分: 15点] ---
+        # 出来高の伴う動きかどうか
+        vol = vol_series.iloc[-1]
+        avg_vol = vol_series.rolling(30).mean().iloc[-2] if len(hist) > 30 else 0
+        if avg_vol > 0:
+            rvol = vol / avg_vol
+            if rvol >= 3.0: 
+                score += 15
+            elif rvol >= 1.5: 
+                score += 10
+            elif rvol >= 0.8: 
+                score += 5
+
+        # --- 5. 簡易VPVR (価格帯別出来高の支持線チェック) [配分: 25点] ---
+        # 現在価格のすぐ下に取引が集中した価格帯（サポート）があるか
+        # 過去60日のデータを約10分割して出来高プロファイルを作成
+        hist_60 = hist.tail(60)
+        min_p = hist_60['Low'].min()
+        max_p = hist_60['High'].max()
+        if max_p > min_p:
+            bins = np.linspace(min_p, max_p, 11)
+            vol_profile = np.zeros(10)
+            
+            for i in range(len(hist_60)):
+                h_price = hist_60['Close'].iloc[i]
+                h_vol = hist_60['Volume'].iloc[i]
+                # どのビンに入るか
+                idx = np.digitize(h_price, bins) - 1
+                idx = min(max(idx, 0), 9)
+                vol_profile[idx] += h_vol
+                
+            # 最大出来高の価格帯（POC: Point of Control）
+            poc_idx = np.argmax(vol_profile)
+            poc_price_low = bins[poc_idx]
+            poc_price_high = bins[poc_idx+1]
+            poc_center = (poc_price_low + poc_price_high) / 2
+            
+            # 現在価格がPOCのすぐ上（0%〜+5%）にある場合は強力なサポートとして加点
+            pct_from_poc = (c_price - poc_center) / poc_center
+            if 0 <= pct_from_poc <= 0.05:
+                score += 25  # 強力なサポート上
+            elif 0.05 < pct_from_poc <= 0.15:
+                score += 15  # やや離れているが上にある
+            elif pct_from_poc < 0:
+                score += 5   # POCより下（抵抗帯になる可能性）
+
+        # --- 6. 短期モメンタム (MACD) [配分: 15点] ---
+        ema12 = close_series.ewm(span=12, adjust=False).mean()
+        ema26 = close_series.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        macd_sig = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist = macd_line - macd_sig
+        
+        if macd_line.iloc[-1] > 0 and macd_hist.iloc[-1] > 0:
+            score += 15  # 上昇トレンド＆勢い加速
+        elif macd_hist.iloc[-1] > 0:
+            score += 10  # 勢いのみ上向き（ゴールデンクロス直後など）
+            
+        normalized = min(int(score), 100)
+        return (normalized, c_price) if raw else (_score_to_label(normalized), c_price)
+        
+    except Exception as e:
+        return ("-", None) if not raw else (0, None)
+
+def calculate_buy_timing_score_v4(hist, raw=False):
+    """V4: 環境認識ハイブリッド型 (V2とV3の自動切り替え)"""
+    try:
+        if hist.empty or len(hist) < 60:
+            return ("-", None) if not raw else (0, None)
+            
+        import pandas as pd
+        c_price = float(hist['Close'].iloc[-1])
+        
+        # --- 環境判定 ---
+        # 1. 長期トレンド (200日または60日SMA)
+        period = 200 if len(hist) >= 200 else 60
+        sma_long = hist['Close'].rolling(period).mean().iloc[-1]
+        
+        # 2. ボラティリティ (ATR%を計算)
+        high_series = hist['High']
+        low_series = hist['Low']
+        close_series = hist['Close']
+        tr1 = high_series - low_series
+        tr2 = (high_series - close_series.shift()).abs()
+        tr3 = (low_series - close_series.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean().iloc[-1]
+        atr_pct = atr / c_price if c_price > 0 else 0
+        
+        # 条件判定: SMAより上で、1日の平均変動幅(ATR)が1%以上ある銘柄は「強い上昇トレンド」とみなす
+        is_strong_trend = (c_price > sma_long) and (atr_pct >= 0.01)
+        
+        if is_strong_trend:
+            # 強い上昇トレンド・高ボラティリティ相場 -> V2 (順張り・ブレイク特化)
+            return calculate_buy_timing_score_v2(hist, raw=raw)
+        else:
+            # レンジ相場・下落トレンド・低ボラティリティ相場 -> V3 (押し目・ダマシ回避特化)
+            return calculate_buy_timing_score_v3(hist, raw=raw)
+            
+    except Exception:
+        return ("-", None) if not raw else (0, None)
+
+
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="株価・企業情報収集ツール", layout="wide")
+
+page = st.sidebar.radio("🧭 ナビゲーション", ["ダッシュボード", "最適化シミュレーション"])
+
+if page == "最適化シミュレーション":
+    from simulation import render_simulation_page
+    watchlists = load_watchlists()
+    name_overrides = load_name_overrides()
+    render_simulation_page(watchlists, name_overrides)
+    st.stop()
 
 st.title("📈 株価・企業情報 収集ツール")
 
@@ -293,15 +473,47 @@ watchlist_names = list(watchlists.keys())
 # --- サイドバー: ウォッチリストの管理（設定系をまとめる） ---
 with st.sidebar.expander("📝 ウォッチリスト管理", expanded=False):
     st.markdown("#### 銘柄コードの編集")
-    selected_for_edit = st.selectbox("編集するリスト", watchlist_names, key="edit_wl")
-    edit_tickers = watchlists.get(selected_for_edit, "")
-    edited_tickers = st.text_area("銘柄コード（カンマ、改行、スペース区切り）", edit_tickers, height=100, key=f"edit_tickers_{selected_for_edit}")
-    if st.button("💾 保存"):
-        watchlists[selected_for_edit] = edited_tickers
-        save_watchlists(watchlists)
-        st.success(f"「{selected_for_edit}」を更新しました！")
-        st.rerun()
+    # 「すべて」は編集不可のため選択肢から除外する
+    editable_names = [n for n in watchlist_names if n != "🌟 すべて"]
+    if editable_names:
+        selected_for_edit = st.selectbox("編集するリスト", editable_names, key="edit_wl")
+        edit_tickers = watchlists.get(selected_for_edit, "")
+        edited_tickers = st.text_area("銘柄コード（カンマ、改行、スペース区切り）", edit_tickers, height=100, key=f"edit_tickers_{selected_for_edit}")
+        if st.button("💾 保存"):
+            watchlists[selected_for_edit] = edited_tickers
+            save_watchlists(watchlists)
+            st.success(f"「{selected_for_edit}」を更新しました！")
+            st.rerun()
+    else:
+        st.info("編集可能なリストがありません")
     
+    st.markdown("---")
+    st.markdown("#### 🔄 リスト並べ替え")
+    wl_options_for_order = [wl for wl in watchlists.keys() if wl != "🌟 すべて"]
+    if len(wl_options_for_order) > 0:
+        selected_for_order = st.selectbox("移動するリスト", wl_options_for_order, key="wl_order_sel")
+        col_up, col_down = st.columns(2)
+        with col_up:
+            if st.button("🔼 上へ", key="btn_wl_up_sidebar", use_container_width=True):
+                wl_keys = list(watchlists.keys())
+                idx = wl_keys.index(selected_for_order)
+                if idx > 0 and wl_keys[idx - 1] != "🌟 すべて":
+                    wl_keys[idx], wl_keys[idx - 1] = wl_keys[idx - 1], wl_keys[idx]
+                    watchlists = {k: watchlists[k] for k in wl_keys}
+                    save_watchlists(watchlists)
+                    st.rerun()
+        with col_down:
+            if st.button("🔽 下へ", key="btn_wl_down_sidebar", use_container_width=True):
+                wl_keys = list(watchlists.keys())
+                idx = wl_keys.index(selected_for_order)
+                if idx < len(wl_keys) - 1:
+                    wl_keys[idx], wl_keys[idx + 1] = wl_keys[idx + 1], wl_keys[idx]
+                    watchlists = {k: watchlists[k] for k in wl_keys}
+                    save_watchlists(watchlists)
+                    st.rerun()
+    else:
+        st.info("並べ替え可能なリストがありません")
+
     st.markdown("---")
     st.markdown("#### ➕ 新規リスト作成")
     new_wl_name = st.text_input("新しいウォッチリスト名")
@@ -317,8 +529,8 @@ with st.sidebar.expander("📝 ウォッチリスト管理", expanded=False):
     
     st.markdown("---")
     st.markdown("#### 🗑️ リスト削除")
-    if len(watchlist_names) > 1:
-        del_wl = st.selectbox("削除するリスト", watchlist_names, key="del_wl")
+    if len(editable_names) > 0:
+        del_wl = st.selectbox("削除するリスト", editable_names, key="del_wl")
         if st.button("削除", type="secondary"):
             if del_wl in watchlists:
                 del watchlists[del_wl]
@@ -326,7 +538,7 @@ with st.sidebar.expander("📝 ウォッチリスト管理", expanded=False):
                 st.success(f"「{del_wl}」を削除しました")
                 st.rerun()
     else:
-        st.info("リストが1つしかないため削除できません")
+        st.info("削除可能なリストがありません")
 
 with st.sidebar.expander("✏️ 企業名の修正", expanded=False):
     st.markdown("自動取得した企業名が間違っている場合に修正できます")
@@ -354,15 +566,29 @@ with st.sidebar.expander("✏️ 企業名の修正", expanded=False):
                     st.rerun()
 
 # --- メインエリア: ウォッチリスト選択とアクションボタン ---
-wl_col, btn1_col, btn2_col = st.columns([2, 1, 1])
+wl_col, btn1_col, btn2_col = st.columns([3, 1, 1])
+
+watchlist_names = list(watchlists.keys())
+if "🌟 すべて" not in watchlist_names:
+    watchlist_names.insert(0, "🌟 すべて")
+
 with wl_col:
     selected_watchlist = st.selectbox("📂 ウォッチリスト", watchlist_names, label_visibility="collapsed")
 with btn1_col:
-    do_fetch = st.button("🔍 取得", use_container_width=True)
+    do_fetch = st.button("🔍 取得(更新)", use_container_width=True)
 with btn2_col:
-    do_refetch = st.button("🔄 再取得", use_container_width=True, disabled=("stock_df" not in st.session_state))
+    do_refetch = st.button("🔄 表示", use_container_width=True, disabled=("stock_df" not in st.session_state))
 
-tickers_input = watchlists.get(selected_watchlist, "")
+if selected_watchlist == "🌟 すべて":
+    all_tickers = []
+    for wl_tickers in watchlists.values():
+        raw_t = re.split(r'[,\n\s]+', wl_tickers)
+        for t in raw_t:
+            if t.strip() and t.strip() not in all_tickers:
+                all_tickers.append(t.strip())
+    tickers_input = ", ".join(all_tickers)
+else:
+    tickers_input = watchlists.get(selected_watchlist, "")
 
 def fetch_stock_data(tickers_input):
     """銘柄データを取得してDataFrameを返す共通処理"""
@@ -490,6 +716,8 @@ def fetch_stock_data(tickers_input):
             predicted_trend = "-"
             buy_timing_rate = "-"
             buy_timing_v2 = "-"
+            buy_timing_v3 = "-"
+            buy_timing_v4 = "-"
             
             try:
                 hist = stock.history(period="1y")
@@ -513,6 +741,12 @@ def fetch_stock_data(tickers_input):
                     
                     rate_v2, _ = calculate_buy_timing_score_v2(hist)
                     if rate_v2: buy_timing_v2 = rate_v2
+                    
+                    rate_v3, _ = calculate_buy_timing_score_v3(hist)
+                    if rate_v3: buy_timing_v3 = rate_v3
+                    
+                    rate_v4, _ = calculate_buy_timing_score_v4(hist)
+                    if rate_v4: buy_timing_v4 = rate_v4
                     
             except Exception:
                 pass
@@ -542,13 +776,13 @@ def fetch_stock_data(tickers_input):
 
             if is_japan_stock:
                 links_html = (
-                    f'<a href="https://shikiho.toyokeizai.net/stocks/{display_ticker}" target="_blank" title="四季報">📘</a> '
-                    f'<a href="https://minkabu.jp/stock/{display_ticker}" target="_blank" title="みんかぶ">📗</a> '
-                    f'<a href="https://kabutan.jp/stock/?code={display_ticker}" target="_blank" title="かぶたん">📙</a> '
-                    f'<a href="https://www.buffett-code.com/company/{display_ticker}/" target="_blank" title="バフェットコード">📕</a>'
+                    f'<a href="https://shikiho.toyokeizai.net/stocks/{display_ticker}" target="_blank" rel="noopener noreferrer" title="四季報">📘</a> '
+                    f'<a href="https://minkabu.jp/stock/{display_ticker}" target="_blank" rel="noopener noreferrer" title="みんかぶ">📗</a> '
+                    f'<a href="https://kabutan.jp/stock/?code={display_ticker}" target="_blank" rel="noopener noreferrer" title="かぶたん">📙</a> '
+                    f'<a href="https://www.buffett-code.com/company/{display_ticker}/" target="_blank" rel="noopener noreferrer" title="バフェットコード">📕</a>'
                 )
             else:
-                links_html = f'<a href="https://finance.yahoo.com/quote/{query_ticker}" target="_blank" title="Yahoo Finance">🌐</a>'
+                links_html = f'<a href="https://finance.yahoo.com/quote/{query_ticker}" target="_blank" rel="noopener noreferrer" title="Yahoo Finance">🌐</a>'
 
             data = {
                 "銘柄コード": display_ticker,
@@ -557,9 +791,12 @@ def fetch_stock_data(tickers_input):
                 "現在株価": current_price,
                 "チャート": "",  # 後でSVGをセット
                 "V1トレンド": "",  
-                "V2トレンド": "",
+                "V3トレンド": "",
+                "V4トレンド": "",
                 "買い時率V1": buy_timing_rate,
                 "買い時率V2": buy_timing_v2,
+                "買い時率V3": buy_timing_v3,
+                "買い時率V4": buy_timing_v4,
                 "1か月後予想株価": predicted_trend,
                 "出来高": volume_str,
                 "平均出来高": avg_volume_str,
@@ -569,7 +806,9 @@ def fetch_stock_data(tickers_input):
                 "配当落ち日": ex_div_date,
                 "次回決算日": earnings_date,
                 "_score_v1": 0,
-                "_score_v2": 0
+                "_score_v2": 0,
+                "_score_v3": 0,
+                "_score_v4": 0
             }
             # ミニチャート用SVGを生成
             try:
@@ -631,6 +870,49 @@ def fetch_stock_data(tickers_input):
                         v2_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v2}" fill="none" stroke="{v2_color}" stroke-width="1.5"/></svg>'
                         data["V2トレンド"] = v2_svg
                         
+                    # V3推移チャート用SVGを生成
+                    if len(hist) >= 40:
+                        scores_20_v3 = []
+                        for i in range(20, 0, -1):
+                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
+                            score, _ = calculate_buy_timing_score_v3(sub_hist, raw=True)
+                            scores_20_v3.append(score if score is not None and score != "-" else 0)
+                        
+                        min_score, max_score = 0, 100
+                        svg_pts_v3 = []
+                        w, h = 80, 24
+                        for idx, val in enumerate(scores_20_v3):
+                            x = idx * (w / 19)
+                            y = h - ((val - min_score) / (max_score - min_score) * h)
+                            svg_pts_v3.append(f"{x:.1f},{y:.1f}")
+                        
+                        v3_color = "#ff5252" if scores_20_v3[-1] < scores_20_v3[0] else "#4caf50"
+                        pts_str_v3 = " ".join(svg_pts_v3)
+                        v3_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v3}" fill="none" stroke="{v3_color}" stroke-width="1.5"/></svg>'
+                        data["V3トレンド"] = v3_svg
+                        
+                    # V4推移チャート用SVGを生成
+                    if len(hist) >= 40:
+                        scores_20_v4 = []
+                        for i in range(20, 0, -1):
+                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
+                            score, _ = calculate_buy_timing_score_v4(sub_hist, raw=True)
+                            scores_20_v4.append(score if score is not None and score != "-" else 0)
+                        
+                        min_score, max_score = 0, 100
+                        svg_pts_v4 = []
+                        w, h = 80, 24
+                        for idx, val in enumerate(scores_20_v4):
+                            x = idx * (w / 19)
+                            y = h - ((val - min_score) / (max_score - min_score) * h)
+                            svg_pts_v4.append(f"{x:.1f},{y:.1f}")
+                        
+                        v4_color = "#ff5252" if scores_20_v4[-1] < scores_20_v4[0] else "#4caf50"
+                        pts_str_v4 = " ".join(svg_pts_v4)
+                        v4_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v4}" fill="none" stroke="{v4_color}" stroke-width="1.5"/></svg>'
+                        data["V4トレンド"] = v4_svg
+                        
+                        
             except Exception:
                 pass
             # ソート/フィルタ用のスコア数値を抽出
@@ -642,6 +924,12 @@ def fetch_stock_data(tickers_input):
                 m2 = _re.search(r'(\d+)%', str(buy_timing_v2))
                 if m2:
                     data["_score_v2"] = int(m2.group(1))
+                m3 = _re.search(r'(\d+)%', str(data.get("買い時率V3", "-")))
+                if m3:
+                    data["_score_v3"] = int(m3.group(1))
+                m4 = _re.search(r'(\d+)%', str(data.get("買い時率V4", "-")))
+                if m4:
+                    data["_score_v4"] = int(m4.group(1))
             except Exception:
                 pass
             data_list.append(data)
@@ -703,6 +991,8 @@ def smart_refetch(existing_df, tickers_input, same_day=True):
             predicted_trend = "-"
             buy_timing_rate = "-"
             buy_timing_v2 = "-"
+            buy_timing_v3 = "-"
+            buy_timing_v4 = "-"
             buy_timing_1w = "-"
             price_1w = "-"
             chg_1w = "-"
@@ -710,6 +1000,10 @@ def smart_refetch(existing_df, tickers_input, same_day=True):
             price_2w = "-"
             chg_2w = "-"
             chart_svg = prev.get("チャート", "")
+            v1_svg = prev.get("V1トレンド", "")
+            v2_svg = prev.get("V2トレンド", "")
+            v3_svg = prev.get("V3トレンド", "")
+            v4_svg = prev.get("V4トレンド", "")
             
             if same_day:
                 # 当日再取得: 買い時率V1/V2は前回データを再利用
@@ -737,6 +1031,10 @@ def smart_refetch(existing_df, tickers_input, same_day=True):
                         if rate_now: buy_timing_rate = rate_now
                         rate_v2, _ = calculate_buy_timing_score_v2(hist)
                         if rate_v2: buy_timing_v2 = rate_v2
+                        rate_v3, _ = calculate_buy_timing_score_v3(hist)
+                        if rate_v3: buy_timing_v3 = rate_v3
+                        rate_v4, _ = calculate_buy_timing_score_v4(hist)
+                        if rate_v4: buy_timing_v4 = rate_v4
                         
                         # 1W前
                         if len(hist) > 5:
@@ -813,8 +1111,14 @@ def smart_refetch(existing_df, tickers_input, same_day=True):
                     "リンク": prev.get("リンク", ""),
                     "現在株価": current_price,
                     "チャート": chart_svg,
+                    "V1トレンド": v1_svg,
+                    "V2トレンド": v2_svg,
+                    "V3トレンド": v3_svg,
+                    "V4トレンド": v4_svg,
                     "買い時率V1": buy_timing_rate,
                     "買い時率V2": buy_timing_v2,
+                    "買い時率V3": buy_timing_v3,
+                    "買い時率V4": buy_timing_v4,
                     "1W前買い時率": buy_timing_1w,
                     "1W前株価": price_1w,
                     "1W変動": chg_1w,
@@ -840,8 +1144,14 @@ def smart_refetch(existing_df, tickers_input, same_day=True):
                     "リンク": prev.get("リンク", ""),
                     "現在株価": current_price,
                     "チャート": chart_svg,
+                    "V1トレンド": v1_svg,
+                    "V2トレンド": v2_svg,
+                    "V3トレンド": v3_svg,
+                    "V4トレンド": v4_svg,
                     "買い時率V1": buy_timing_rate,
                     "買い時率V2": buy_timing_v2,
+                    "買い時率V3": buy_timing_v3,
+                    "買い時率V4": buy_timing_v4,
                     "1W前買い時率": buy_timing_1w,
                     "1W前株価": price_1w,
                     "1W変動": chg_1w,
@@ -866,6 +1176,10 @@ def smart_refetch(existing_df, tickers_input, same_day=True):
                 if m1: data["_score_v1"] = int(m1.group(1))
                 m2 = re.search(r'(\d+)%', str(buy_timing_v2))
                 if m2: data["_score_v2"] = int(m2.group(1))
+                m3 = re.search(r'(\d+)%', str(buy_timing_v3))
+                if m3: data["_score_v3"] = int(m3.group(1))
+                m4 = re.search(r'(\d+)%', str(buy_timing_v4))
+                if m4: data["_score_v4"] = int(m4.group(1))
             except Exception:
                 pass
             data_list.append(data)
@@ -963,11 +1277,60 @@ if current_wl != selected_watchlist or "stock_df" not in st.session_state:
         try:
             with open(LAST_DATA_FILE, "r", encoding="utf-8") as f:
                 all_saved = json.load(f)
-            if selected_watchlist in all_saved:
+            
+            # --- 複数リスト間の重複銘柄・最新データ共有ロジック ---
+            latest_data = {}
+            latest_time = {}
+            for wl_name, wl_info in all_saved.items():
+                w_time_str = wl_info.get("fetch_time", "")
+                try:
+                    w_time = datetime.strptime(w_time_str, "%Y-%m-%d %H:%M:%S")
+                except:
+                    w_time = datetime.min
+                for row in wl_info.get("data", []):
+                    ticker = row.get("銘柄コード")
+                    if not ticker: continue
+                    if ticker not in latest_time or w_time > latest_time[ticker]:
+                        latest_time[ticker] = w_time
+                        latest_data[ticker] = (row, w_time_str)
+
+            if selected_watchlist == "🌟 すべて":
+                current_all_tickers = []
+                for wl_tickers in watchlists.values():
+                    for t in re.split(r'[,\n\s]+', wl_tickers):
+                        t = t.strip()
+                        if not t: continue
+                        if t.isdigit() and len(t) == 4:
+                            current_all_tickers.append(t)
+                        elif t.endswith(".T") and t[:-2].isdigit() and len(t[:-2]) == 4:
+                            current_all_tickers.append(t[:-2])
+                        else:
+                            current_all_tickers.append(t)
+                current_all_tickers = set(current_all_tickers)
+                
+                all_rows = [data[0] for ticker, data in latest_data.items() if ticker in current_all_tickers]
+                if all_rows:
+                    st.session_state["stock_df"] = pd.DataFrame(all_rows)
+                    st.session_state["stock_fetch_time"] = max([data[1] for ticker, data in latest_data.items() if ticker in current_all_tickers])
+                else:
+                    st.session_state.pop("stock_df", None)
+                    st.session_state.pop("stock_fetch_time", None)
+                st.session_state["stock_wl_name"] = selected_watchlist
+
+            elif selected_watchlist in all_saved:
                 wl_data = all_saved[selected_watchlist]
-                st.session_state["stock_df"] = pd.DataFrame(wl_data["data"])
+                updated_rows = []
+                for row in wl_data.get("data", []):
+                    ticker = row.get("銘柄コード")
+                    # キャッシュ全体から最も新しいデータを取得して上書き
+                    if ticker and ticker in latest_data:
+                        updated_rows.append(latest_data[ticker][0])
+                    else:
+                        updated_rows.append(row)
+                st.session_state["stock_df"] = pd.DataFrame(updated_rows)
                 st.session_state["stock_fetch_time"] = wl_data.get("fetch_time", "")
                 st.session_state["stock_wl_name"] = selected_watchlist
+                
             elif current_wl != selected_watchlist:
                 # 切替先のウォッチリストにはまだデータがない場合はクリア
                 st.session_state.pop("stock_df", None)
@@ -979,6 +1342,16 @@ if current_wl != selected_watchlist or "stock_df" not in st.session_state:
 # session_stateに結果があれば常に表示
 if "stock_df" in st.session_state:
     df = st.session_state["stock_df"]
+    
+    # 古いキャッシュデータ用に欠損カラムを補完
+    for col in ["V3トレンド", "V4トレンド", "買い時率V3", "買い時率V4"]:
+        if col not in df.columns:
+            df[col] = "-"
+    if "_score_v3" not in df.columns:
+        df["_score_v3"] = 0
+    if "_score_v4" not in df.columns:
+        df["_score_v4"] = 0
+
     fetch_time = st.session_state.get("stock_fetch_time", "")
     
     st.success(f"データ取得完了！（最終取得: {fetch_time}）")
@@ -986,15 +1359,39 @@ if "stock_df" in st.session_state:
     # --- コントロールバー: ソート、フィルタ、表示切替 ---
     ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([1, 1, 1])
     with ctrl_c1:
-        sort_option = st.selectbox("↕️ ソート", ["なし", "買い時率V2 ⬇", "買い時率V2 ⬆", "買い時率V1 ⬇", "買い時率V1 ⬆", "1W変動 ⬇", "1W変動 ⬆"], label_visibility="collapsed")
+        sort_option = st.selectbox("↕️ ソート", [
+            "なし", 
+            "銘柄コード ⬇", "銘柄コード ⬆", 
+            "現在株価 ⬇", "現在株価 ⬆",
+            "1W変動 ⬇", "1W変動 ⬆",
+            "配当利回り ⬇", "配当利回り ⬆",
+            "買い時率V4 ⬇", "買い時率V4 ⬆", 
+            "買い時率V3 ⬇", "買い時率V3 ⬆", 
+            "買い時率V2 ⬇", "買い時率V2 ⬆", 
+            "買い時率V1 ⬇", "買い時率V1 ⬆"
+        ], label_visibility="collapsed")
     with ctrl_c2:
-        filter_option = st.selectbox("🎯 フィルタ", ["すべて", "🔥 V2 買い時 (≥65%)", "🔥🔥 V2 絶好機 (≥85%)", "❄️ V2 様子見 (<40%)", "🔥 V1 買い時 (≥65%)", "🔥🔥 V1 絶好機 (≥85%)", "❄️ V1 様子見 (<40%)"], label_visibility="collapsed")
+        filter_option = st.selectbox("🎯 フィルタ", ["すべて", "🔥 V4 買い時 (≥65%)", "🔥🔥 V4 絶好機 (≥85%)", "❄️ V4 様子見 (<40%)", "🔥 V3 買い時 (≥65%)", "🔥🔥 V3 絶好機 (≥85%)", "❄️ V3 様子見 (<40%)", "🔥 V2 買い時 (≥65%)", "🔥🔥 V2 絶好機 (≥85%)", "❄️ V2 様子見 (<40%)", "🔥 V1 買い時 (≥65%)", "🔥🔥 V1 絶好機 (≥85%)", "❄️ V1 様子見 (<40%)"], label_visibility="collapsed")
     with ctrl_c3:
         view_mode = st.selectbox("👁 表示", ["詳細表示", "簡易表示"], label_visibility="collapsed")
     
     # --- フィルタ適用 ---
     display_df = df.copy()
-    if "V2" in filter_option and "_score_v2" in display_df.columns:
+    if "V4" in filter_option and "_score_v4" in display_df.columns:
+        if "≥65%" in filter_option:
+            display_df = display_df[display_df["_score_v4"] >= 65]
+        elif "≥85%" in filter_option:
+            display_df = display_df[display_df["_score_v4"] >= 85]
+        elif "<40%" in filter_option:
+            display_df = display_df[display_df["_score_v4"] < 40]
+    elif "V3" in filter_option and "_score_v3" in display_df.columns:
+        if "≥65%" in filter_option:
+            display_df = display_df[display_df["_score_v3"] >= 65]
+        elif "≥85%" in filter_option:
+            display_df = display_df[display_df["_score_v3"] >= 85]
+        elif "<40%" in filter_option:
+            display_df = display_df[display_df["_score_v3"] < 40]
+    elif "V2" in filter_option and "_score_v2" in display_df.columns:
         if "≥65%" in filter_option:
             display_df = display_df[display_df["_score_v2"] >= 65]
         elif "≥85%" in filter_option:
@@ -1011,19 +1408,47 @@ if "stock_df" in st.session_state:
     
     # --- ソート適用 ---
     if sort_option != "なし":
-        if "買い時率V2" in sort_option and "_score_v2" in display_df.columns:
-            asc = "⬆" in sort_option
+        asc = "⬆" in sort_option
+        if "買い時率V4" in sort_option and "_score_v4" in display_df.columns:
+            display_df = display_df.sort_values("_score_v4", ascending=asc)
+        elif "買い時率V3" in sort_option and "_score_v3" in display_df.columns:
+            display_df = display_df.sort_values("_score_v3", ascending=asc)
+        elif "買い時率V2" in sort_option and "_score_v2" in display_df.columns:
             display_df = display_df.sort_values("_score_v2", ascending=asc)
         elif "買い時率V1" in sort_option and "_score_v1" in display_df.columns:
-            asc = "⬆" in sort_option
             display_df = display_df.sort_values("_score_v1", ascending=asc)
+        elif "銘柄コード" in sort_option:
+            display_df = display_df.sort_values("銘柄コード", ascending=asc)
+        elif "現在株価" in sort_option:
+            # Noneや文字列が混ざる可能性があるため、数値に強制変換してソート
+            display_df["_sort_price"] = pd.to_numeric(display_df["現在株価"], errors="coerce").fillna(-999)
+            display_df = display_df.sort_values("_sort_price", ascending=asc)
+            display_df = display_df.drop(columns=["_sort_price"])
+        elif "配当利回り" in sort_option:
+            # "3.45%" や "-" を数値に変換
+            display_df["_sort_div"] = display_df["配当利回り"].astype(str).str.replace("%", "", regex=False).replace("-", "-999")
+            display_df["_sort_div"] = pd.to_numeric(display_df["_sort_div"], errors="coerce").fillna(-999)
+            display_df = display_df.sort_values("_sort_div", ascending=asc)
+            display_df = display_df.drop(columns=["_sort_div"])
+        elif "1W変動" in sort_option:
+            # "📈 +2.5%" 等から数値を抽出
+            display_df["_sort_1w"] = display_df["1W変動"].astype(str).str.extract(r'([+-]?\d+\.?\d*)').astype(float).fillna(-999)
+            display_df = display_df.sort_values("_sort_1w", ascending=asc)
+            display_df = display_df.drop(columns=["_sort_1w"])
     
     # --- 列表示切替 ---
-    simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "V1トレンド", "V2トレンド", "買い時率V1", "買い時率V2", "配当利回り"]
+    simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4", "配当利回り"]
     if view_mode == "簡易表示":
         cols_to_show = [c for c in simple_cols if c in display_df.columns]
     else:
-        cols_to_show = [c for c in display_df.columns if not c.startswith("_")]
+        # 詳細表示の場合も指定の並び順にする
+        target_cols = [
+            "銘柄コード", "企業名", "リンク", "現在株価", "チャート",
+            "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", 
+            "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4"
+        ]
+        other_cols = [c for c in display_df.columns if not c.startswith("_") and c not in target_cols]
+        cols_to_show = [c for c in target_cols if c in display_df.columns] + other_cols
     
     show_df = display_df[cols_to_show]
     
@@ -1032,7 +1457,7 @@ if "stock_df" in st.session_state:
     else:
         # --- 色分けスタイルを適用 ---
         def style_table(styler):
-            current_cols = ["現在株価", "買い時率V1", "買い時率V2"]
+            current_cols = ["現在株価", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4"]
             for col in current_cols:
                 if col in styler.columns:
                     styler = styler.set_properties(subset=[col], **{"background-color": "#1a3a22"})
