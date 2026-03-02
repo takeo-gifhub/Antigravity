@@ -1282,6 +1282,8 @@ if current_wl != selected_watchlist or "stock_df" not in st.session_state:
             latest_data = {}
             latest_time = {}
             for wl_name, wl_info in all_saved.items():
+                if not isinstance(wl_info, dict):
+                    continue
                 w_time_str = wl_info.get("fetch_time", "")
                 try:
                     w_time = datetime.strptime(w_time_str, "%Y-%m-%d %H:%M:%S")
@@ -1319,6 +1321,8 @@ if current_wl != selected_watchlist or "stock_df" not in st.session_state:
 
             elif selected_watchlist in all_saved:
                 wl_data = all_saved[selected_watchlist]
+                if not isinstance(wl_data, dict):
+                    wl_data = {}
                 updated_rows = []
                 for row in wl_data.get("data", []):
                     ticker = row.get("銘柄コード")
