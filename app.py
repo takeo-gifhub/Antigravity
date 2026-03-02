@@ -1424,21 +1424,23 @@ if "stock_df" in st.session_state:
         elif "銘柄コード" in sort_option:
             display_df = display_df.sort_values("銘柄コード", ascending=asc)
         elif "現在株価" in sort_option:
-            # Noneや文字列が混ざる可能性があるため、数値に強制変換してソート
-            display_df["_sort_price"] = pd.to_numeric(display_df["現在株価"], errors="coerce").fillna(-999)
+            # "1,234.50" 等のカンマを除去して数値化
+            display_df["_sort_price"] = display_df["現在株価"].astype(str).str.replace(",", "", regex=False)
+            display_df["_sort_price"] = pd.to_numeric(display_df["_sort_price"], errors="coerce").fillna(-999)
             display_df = display_df.sort_values("_sort_price", ascending=asc)
             display_df = display_df.drop(columns=["_sort_price"])
         elif "配当利回り" in sort_option:
             # "3.45%" や "-" を数値に変換
-            display_df["_sort_div"] = display_df["配当利回り"].astype(str).str.replace("%", "", regex=False).replace("-", "-999")
+            display_df["_sort_div"] = display_df["配当利回り"].astype(str).str.replace("%", "", regex=False).str.replace("-", "-999", regex=False)
             display_df["_sort_div"] = pd.to_numeric(display_df["_sort_div"], errors="coerce").fillna(-999)
             display_df = display_df.sort_values("_sort_div", ascending=asc)
             display_df = display_df.drop(columns=["_sort_div"])
         elif "1W変動" in sort_option:
             # "📈 +2.5%" 等から数値を抽出
-            display_df["_sort_1w"] = display_df["1W変動"].astype(str).str.extract(r'([+-]?\d+\.?\d*)').astype(float).fillna(-999)
-            display_df = display_df.sort_values("_sort_1w", ascending=asc)
-            display_df = display_df.drop(columns=["_sort_1w"])
+            if "1W変動" in display_df.columns:
+                display_df["_sort_1w"] = display_df["1W変動"].astype(str).str.extract(r'([+-]?\d+\.?\d*)').astype(float).fillna(-999)
+                display_df = display_df.sort_values("_sort_1w", ascending=asc)
+                display_df = display_df.drop(columns=["_sort_1w"])
     
     # --- 列表示切替 ---
     simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4", "配当利回り"]
