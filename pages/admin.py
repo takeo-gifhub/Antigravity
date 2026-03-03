@@ -2,6 +2,8 @@ import streamlit as st
 import json
 import os
 
+from config import LAST_DATA_FILE, BUY_TIMING_HISTORY_FILE
+
 st.set_page_config(page_title="管理画面", layout="wide")
 
 st.title("⚙️ 管理画面")
@@ -28,9 +30,6 @@ st.markdown("---")
 
 # --- 取得ログ ---
 st.header("📋 取得ログ")
-
-LAST_DATA_FILE = "last_stock_data.json"
-BUY_TIMING_HISTORY_FILE = "buy_timing_history.json"
 
 if os.path.exists(LAST_DATA_FILE):
     try:

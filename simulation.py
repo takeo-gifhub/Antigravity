@@ -1,10 +1,14 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import itertools
+import re
 from datetime import datetime, timedelta
 import json
 import os
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 SETTINGS_FILE = "sim_settings.json"
 BEST_RESULTS_FILE = "sim_best_results.json"
@@ -52,7 +56,7 @@ def load_sim_settings():
                 if data and "opt_mode" in data:  # Legacy single-profile format
                     return {"デフォルト": data}
                 return data
-        except:
+        except Exception:
             return {}
     return {}
 
@@ -60,7 +64,7 @@ def save_sim_settings(settings):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, ensure_ascii=False, indent=4)
-    except:
+    except Exception:
         pass
 
 def load_best_results():
@@ -68,7 +72,7 @@ def load_best_results():
         try:
             with open(BEST_RESULTS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return []
     return []
 
@@ -76,7 +80,7 @@ def save_best_results(results):
     try:
         with open(BEST_RESULTS_FILE, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=4)
-    except:
+    except Exception:
         pass
 
 def calculate_daily_v1_scores(df):
@@ -147,7 +151,7 @@ def calculate_daily_v3_scores(df):
     """V3 (マルチタイムフレーム・ボラティリティ・VWAP等の加味)の過去スコアを一括計算"""
     score_df = pd.DataFrame(index=df.index)
     score_df['Score'] = 0
-    import numpy as np
+
     
     # 全期間をループで処理するのは遅いかもしれないが、
     # V3は内部で過去のヒストグラムやATR等を動的計算するため、iterrowsで1日ずつapp.py側の関数を呼ぶか、
@@ -233,8 +237,7 @@ def calculate_daily_v3_scores(df):
 
 def calculate_daily_v4_scores(df):
     """V4 (環境認識ハイブリッド型)の過去スコアを一括計算"""
-    import numpy as np
-    import pandas as pd
+
     
     close = df['Close']
     high = df['High']
@@ -535,7 +538,7 @@ def run_portfolio_backtest(df_dict, initial_capital, buy_score, sell_score, take
                     try:
                         last_price = df.loc[:date, 'Close'].iloc[-1]
                         equity += positions[ticker] * last_price
-                    except:
+                    except Exception:
                         equity += positions[ticker] * entry_prices[ticker]
         daily_equity.append(equity)
         
@@ -595,7 +598,7 @@ def run_portfolio_bnh_backtest(df_dict, initial_capital):
                     try:
                         last_price = df.loc[:date, 'Close'].iloc[-1]
                         equity += positions[ticker] * last_price
-                    except:
+                    except Exception:
                         pass
         daily_equity.append(equity)
         
@@ -1078,19 +1081,19 @@ def render_simulation_page(watchlists, name_overrides):
                     if "🔵" in trd['取引']:
                         buy_x.append(d_obj)
                         buy_y.append(eq)
-                        buy_text.append(f"買: {trd['株数']}株<br>¥{trd['株価']:,.0f}")
+                        buy_text.append(f"買: {trd['株数']}株<br>¥{trd['約定価格']:,.0f}")
                     elif "🔴 売却" in trd['取引']:
                         sell_x.append(d_obj)
                         sell_y.append(eq)
-                        sell_text.append(f"売: {trd['株数']}株<br>¥{trd['株価']:,.0f}<br>損益: {trd['損益']}")
+                        sell_text.append(f"売: {trd['株数']}株<br>¥{trd['約定価格']:,.0f}<br>損益: {trd.get('損益(%)', 0):+.1f}%")
                     elif "🟢 利確" in trd['取引']:
                         tp_x.append(d_obj)
                         tp_y.append(eq)
-                        tp_text.append(f"利確: {trd['株数']}株<br>¥{trd['株価']:,.0f}<br>損益: {trd['損益']}")
+                        tp_text.append(f"利確: {trd['株数']}株<br>¥{trd['約定価格']:,.0f}<br>損益: {trd.get('損益(%)', 0):+.1f}%")
                     elif "🟣 損切" in trd['取引']:
                         sl_x.append(d_obj)
                         sl_y.append(eq)
-                        sl_text.append(f"損切: {trd['株数']}株<br>¥{trd['株価']:,.0f}<br>損益: {trd['損益']}")
+                        sl_text.append(f"損切: {trd['株数']}株<br>¥{trd['約定価格']:,.0f}<br>損益: {trd.get('損益(%)', 0):+.1f}%")
 
             # マーカーの追加 (左軸の資産グラフ上に配置)
             if buy_x:
@@ -1227,7 +1230,7 @@ def show_historical_details(row, watchlists, ticker_to_name):
         code_str = target_name.split(" ")[0]
         target_codes = [code_str]
     else:
-        import re
+
         m = re.search(r'\((.*?)\)', target_name)
         wl_name = m.group(1) if m else target_name
         
@@ -1249,6 +1252,10 @@ def show_historical_details(row, watchlists, ticker_to_name):
                     
             if "V1" in trend_type:
                 scored_df = calculate_daily_v1_scores(hist)
+            elif "V3" in trend_type:
+                scored_df = calculate_daily_v3_scores(hist)
+            elif "V4" in trend_type:
+                scored_df = calculate_daily_v4_scores(hist)
             else:
                 scored_df = calculate_daily_v2_scores(hist)
                 
@@ -1306,8 +1313,7 @@ def show_historical_details(row, watchlists, ticker_to_name):
             
         st.markdown(f"**📊 比較**: 最適化ルールの方が、ナンピン・ガチホよりも **{diff_pct:+.2f}%** 最終成績が良いです！")
         
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+
 
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         fig.add_trace(go.Scatter(x=best_all_dates, y=best_curve, name="最適化ルール (左軸:資産)", line=dict(color="#00AEEF", width=2)), secondary_y=False)

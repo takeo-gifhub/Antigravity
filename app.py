@@ -9,47 +9,40 @@ import re
 from deep_translator import GoogleTranslator
 import requests
 import time
-import base64
-import io
+import urllib.parse
 
-# 登録済みウォッチリストの保存先ファイル
-WATCHLIST_FILE = "watchlists.json"
-JQUANTS_TOKEN_FILE = "jquants_token.txt"
-LAST_DATA_FILE = "last_stock_data.json"
-NAME_OVERRIDE_FILE = "name_overrides.json"
-BUY_TIMING_HISTORY_FILE = "buy_timing_history.json"
-
-def load_watchlists():
-    if os.path.exists(WATCHLIST_FILE):
-        try:
-            with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"メイン": "7203, 7974, AAPL"}
-
-def save_watchlists(data):
-    with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+from config import (
+    WATCHLIST_FILE, JQUANTS_TOKEN_FILE, LAST_DATA_FILE,
+    NAME_OVERRIDE_FILE, BUY_TIMING_HISTORY_FILE
+)
+from scoring import (
+    _score_to_label,
+    calculate_buy_timing_score,
+    calculate_buy_timing_score_v2,
+    calculate_buy_timing_score_v3,
+    calculate_buy_timing_score_v4,
+)
+from chart_utils import generate_price_chart_svg, generate_score_trend_svg
+from data_io import (
+    load_watchlists, save_watchlists,
+    load_name_overrides, save_name_overrides,
+    get_jquants_company_name, get_earnings_date,
+)
 
 def load_jquants_token():
-    # 優先順: st.secrets → 環境変数 → セッション変数 → ローカルファイル
-    # (1) Streamlit Cloud Secrets（最優先・永続的）
+    """Streamlit対応のAPIキー取得（優先順: secrets → 環境変数 → セッション → ファイル）"""
     try:
         key = st.secrets["JQUANTS_API_KEY"]
         if key:
             return key
     except Exception:
         pass
-    # (2) 環境変数（GitHub Actions等）
     env_key = os.environ.get("JQUANTS_API_KEY", "")
     if env_key:
         return env_key
-    # (3) セッション変数（サイドバーから入力 → Cloud上でもセッション中は有効）
     session_key = st.session_state.get("jquants_api_key_session", "")
     if session_key:
         return session_key
-    # (4) ローカルファイル（ローカル環境用）
     if os.path.exists(JQUANTS_TOKEN_FILE):
         with open(JQUANTS_TOKEN_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
@@ -73,382 +66,13 @@ def _get_jquants_key_source():
     return None
 
 def save_jquants_token(token):
-    # セッション変数に保存（Cloud上でもセッション中は有効）
+    """APIキーをセッション変数とローカルファイルに保存"""
     st.session_state["jquants_api_key_session"] = token
-    # ローカルファイルにも保存（ローカル環境用）
     try:
         with open(JQUANTS_TOKEN_FILE, "w", encoding="utf-8") as f:
             f.write(token)
     except Exception:
         pass  # Cloud上ではファイル書き込みに失敗しても問題ない
-
-def get_jquants_company_name(api_key, code, retries=3):
-    # J-Quants V2 APIは5桁コード（末尾0追加）が必要
-    jq_code = code + "0" if len(code) == 4 else code
-    url = f"https://api.jquants.com/v2/equities/master?code={jq_code}"
-    headers = {"x-api-key": api_key}
-    for attempt in range(retries):
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json().get("data", [])
-                if data:
-                    name = data[-1].get("CompanyName") or data[-1].get("CoName")
-                    if name:
-                        return name
-            elif res.status_code == 429:
-                wait = 3.0 * (attempt + 1)
-                print(f"  ⏳ J-Quants 429 レート制限 ({code}), {wait}秒待機...")
-                time.sleep(wait)
-                continue
-            else:
-                print(f"  ⚠️ J-Quants {res.status_code} ({code})")
-                break
-        except Exception as e:
-            print(f"  ⚠️ J-Quants 例外 ({code}): {e}")
-    return None
-
-def load_name_overrides():
-    if os.path.exists(NAME_OVERRIDE_FILE):
-        with open(NAME_OVERRIDE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_name_overrides(overrides):
-    with open(NAME_OVERRIDE_FILE, "w", encoding="utf-8") as f:
-        json.dump(overrides, f, ensure_ascii=False, indent=2)
-
-def get_earnings_date(stock):
-    """yfinanceのget_calendar()から次回決算日を取得するヘルパー関数"""
-    try:
-        cal = stock.get_calendar()
-        if cal is None:
-            return "-"
-        if isinstance(cal, dict):
-            edates = cal.get('Earnings Date')
-            if not edates:
-                return "-"
-            if isinstance(edates, list) and len(edates) > 0:
-                val = edates[0]
-            else:
-                val = edates
-            return val.strftime('%Y-%m-%d') if hasattr(val, 'strftime') else str(val)
-        if hasattr(cal, 'empty') and not cal.empty and 'Earnings Date' in cal.index:
-            edates = cal.loc['Earnings Date']
-            if isinstance(edates, list) and len(edates) > 0:
-                val = edates[0]
-            else:
-                val = edates
-            return val.strftime('%Y-%m-%d') if hasattr(val, 'strftime') else str(val)
-    except Exception:
-        pass
-    return "-"
-
-def _score_to_label(score):
-    """スコアを絵文字付きラベルに変換"""
-    if score >= 85:
-        return f"🔥🔥 {score}% (絶好機)"
-    elif score >= 65:
-        return f"🔥 {score}% (買い時)"
-    elif score >= 40:
-        return f"⭐ {score}% (中立)"
-    else:
-        return f"❄️ {score}% (様子見)"
-
-def calculate_buy_timing_score(hist, raw=False):
-    """V1: EMA + VWAP + RVOL + MACD + マイクロプルバック (最大100点)"""
-    try:
-        if hist.empty:
-            return ("-", None) if not raw else (0, None)
-        c_price = float(hist['Close'].iloc[-1])
-        score = 0
-        
-        # 1. EMA (9, 20, 200) - トレンド (Max 30点)
-        if len(hist) >= 200:
-            ema9 = hist['Close'].ewm(span=9, adjust=False).mean().iloc[-1]
-            ema20 = hist['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
-            ema200 = hist['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-            if c_price > ema9: score += 10
-            if c_price > ema20: score += 10
-            if c_price > ema200: score += 10
-        
-        # 2. VWAP相当 (Max 20点)
-        vwap_approx = (hist['High'].iloc[-1] + hist['Low'].iloc[-1] + hist['Close'].iloc[-1]) / 3
-        if c_price > vwap_approx: score += 20
-        
-        # 3. RVOL (Max 20点)
-        vol = hist['Volume'].iloc[-1]
-        avg_vol = hist['Volume'].rolling(30).mean().iloc[-2] if len(hist) > 30 else 0
-        if avg_vol > 0:
-            rvol = vol / avg_vol
-            if rvol >= 5.0: score += 20
-            elif rvol >= 2.0: score += 10
-            elif rvol >= 1.0: score += 5
-        
-        # 4. MACD (Max 15点)
-        if len(hist) > 30:
-            macd_line = hist['Close'].ewm(span=12, adjust=False).mean() - hist['Close'].ewm(span=26, adjust=False).mean()
-            if macd_line.iloc[-1] > 0: score += 15
-        
-        # 5. マイクロ・プルバック (Max 15点)
-        if len(hist) >= 2:
-            prev_high = hist['High'].iloc[-2]
-            if c_price > prev_high: score += 15
-            
-        return (score, c_price) if raw else (_score_to_label(score), c_price)
-    except Exception:
-        return ("-", None) if not raw else (0, None)
-
-def calculate_buy_timing_score_v2(hist, raw=False):
-    """V2: V1の5指標 + RSI + ボリンジャーバンド (最大100点に正規化)"""
-    try:
-        if hist.empty:
-            return ("-", None) if not raw else (0, None)
-        c_price = float(hist['Close'].iloc[-1])
-        score = 0
-        max_score = 0
-        
-        # 1. EMA (9, 20, 200) - トレンド (Max 30)
-        max_score += 30
-        if len(hist) >= 200:
-            ema9 = hist['Close'].ewm(span=9, adjust=False).mean().iloc[-1]
-            ema20 = hist['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
-            ema200 = hist['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-            if c_price > ema9: score += 10
-            if c_price > ema20: score += 10
-            if c_price > ema200: score += 10
-        
-        # 2. VWAP相当 (Max 15)
-        max_score += 15
-        vwap_approx = (hist['High'].iloc[-1] + hist['Low'].iloc[-1] + hist['Close'].iloc[-1]) / 3
-        if c_price > vwap_approx: score += 15
-        
-        # 3. RVOL (Max 15)
-        max_score += 15
-        vol = hist['Volume'].iloc[-1]
-        avg_vol = hist['Volume'].rolling(30).mean().iloc[-2] if len(hist) > 30 else 0
-        if avg_vol > 0:
-            rvol = vol / avg_vol
-            if rvol >= 5.0: score += 15
-            elif rvol >= 2.0: score += 10
-            elif rvol >= 1.0: score += 5
-        
-        # 4. MACD (Max 10)
-        max_score += 10
-        if len(hist) > 30:
-            macd_line = hist['Close'].ewm(span=12, adjust=False).mean() - hist['Close'].ewm(span=26, adjust=False).mean()
-            if macd_line.iloc[-1] > 0: score += 10
-        
-        # 5. マイクロ・プルバック (Max 10)
-        max_score += 10
-        if len(hist) >= 2:
-            prev_high = hist['High'].iloc[-2]
-            if c_price > prev_high: score += 10
-        
-        # 6. RSI (相対力指数) - 売られすぎ/買われすぎ判定 (Max 10)
-        max_score += 10
-        if len(hist) >= 15:
-            delta = hist['Close'].diff()
-            gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
-            if loss != 0:
-                rs = gain / loss
-                rsi = 100 - (100 / (1 + rs))
-            else:
-                rsi = 100
-            # RSI 30以下 = 売られすぎ（買いチャンス）, 30-70 = 中立, 70以上 = 過熱（減点）
-            if rsi <= 30: score += 10
-            elif rsi <= 50: score += 7
-            elif rsi <= 70: score += 3
-            # 70以上は加点なし（過熱）
-        
-        # 7. ボリンジャーバンド - 割安度判定 (Max 10)
-        max_score += 10
-        if len(hist) >= 20:
-            sma20 = hist['Close'].rolling(20).mean().iloc[-1]
-            std20 = hist['Close'].rolling(20).std().iloc[-1]
-            lower_band = sma20 - 2 * std20
-            upper_band = sma20 + 2 * std20
-            # 下部バンド付近 = 割安（買いチャンス）
-            if c_price <= lower_band: score += 10
-            elif c_price <= sma20: score += 5
-            # 上部バンド付近 = 加点なし
-        
-        # スコアを100点満点に正規化
-        normalized = int(score / max_score * 100) if max_score > 0 else 0
-        return (normalized, c_price) if raw else (_score_to_label(normalized), c_price)
-    except Exception:
-        return ("-", None) if not raw else (0, None)
-
-def calculate_buy_timing_score_v3(hist, raw=False):
-    """V3: マルチタイム・ボラティリティ適応・過熱感排除型の高度ロジック (最大100点)"""
-    try:
-        import numpy as np
-        if hist.empty or len(hist) < 30:
-            return ("-", None) if not raw else (0, None)
-            
-        c_price = float(hist['Close'].iloc[-1])
-        score = 0
-        max_score = 100 # 固定100点満点で配分
-        
-        # 準備: 基本指標の計算
-        close_series = hist['Close']
-        high_series = hist['High']
-        low_series = hist['Low']
-        vol_series = hist['Volume']
-        
-        # --- 1. 過熱感フィルター (RSI) ---
-        # 買われすぎ状態なら問答無用でスコア上限を制限または0にする
-        delta = close_series.diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
-        rsi = 100 - (100 / (1 + gain/loss)) if loss != 0 else 100
-        
-        if rsi >= 80:
-            # 極端な過熱感: リスクが大きすぎるため0点
-            return (0, c_price) if raw else (_score_to_label(0), c_price)
-
-        # --- 2. マルチタイムフレーム分析 (疑似週足トレンド) [配分: 20点] ---
-        # 短期が良くても長期が下落していれば点数を下げる
-        if len(hist) >= 100:
-            # 20日移動平均(約1ヶ月)、60日移動平均(約3ヶ月)
-            sma20 = close_series.rolling(20).mean().iloc[-1]
-            sma60 = close_series.rolling(60).mean().iloc[-1]
-            if sma20 > sma60:
-                score += 20  # 長期上昇トレンド
-            elif c_price > sma60:
-                score += 10  # トレンド転換の初動の可能性
-            else:
-                score += 0   # 長期下落トレンド（加点なし）
-        else:
-            score += 10 # データ不足の場合は中間点
-            
-        # --- 3. ボラティリティ適応型押し目判定 (ATR考慮) [配分: 25点] ---
-        # 値動きが激しい時は、浅い押し目（下落）では買わない
-        atr_period = 14
-        tr1 = high_series - low_series
-        tr2 = (high_series - close_series.shift()).abs()
-        tr3 = (low_series - close_series.shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(atr_period).mean().iloc[-1]
-        
-        recent_high = high_series.iloc[-10:].max() # 直近10日の高値
-        drawdown = recent_high - c_price
-        
-        if atr > 0:
-            dd_atr_ratio = drawdown / atr
-            # ボラティリティ(ATR)に対してどの程度調整したか
-            if dd_atr_ratio >= 1.5:
-                # 少し深めの押し目（ATR1.5倍以上の下落）
-                score += 25
-            elif dd_atr_ratio >= 0.5:
-                # 浅い押し目
-                score += 15
-            else:
-                # 押し目が無いに等しい（高値圏）
-                score += 5
-                
-        # --- 4. RVOL (相対出来高) [配分: 15点] ---
-        # 出来高の伴う動きかどうか
-        vol = vol_series.iloc[-1]
-        avg_vol = vol_series.rolling(30).mean().iloc[-2] if len(hist) > 30 else 0
-        if avg_vol > 0:
-            rvol = vol / avg_vol
-            if rvol >= 3.0: 
-                score += 15
-            elif rvol >= 1.5: 
-                score += 10
-            elif rvol >= 0.8: 
-                score += 5
-
-        # --- 5. 簡易VPVR (価格帯別出来高の支持線チェック) [配分: 25点] ---
-        # 現在価格のすぐ下に取引が集中した価格帯（サポート）があるか
-        # 過去60日のデータを約10分割して出来高プロファイルを作成
-        hist_60 = hist.tail(60)
-        min_p = hist_60['Low'].min()
-        max_p = hist_60['High'].max()
-        if max_p > min_p:
-            bins = np.linspace(min_p, max_p, 11)
-            vol_profile = np.zeros(10)
-            
-            for i in range(len(hist_60)):
-                h_price = hist_60['Close'].iloc[i]
-                h_vol = hist_60['Volume'].iloc[i]
-                # どのビンに入るか
-                idx = np.digitize(h_price, bins) - 1
-                idx = min(max(idx, 0), 9)
-                vol_profile[idx] += h_vol
-                
-            # 最大出来高の価格帯（POC: Point of Control）
-            poc_idx = np.argmax(vol_profile)
-            poc_price_low = bins[poc_idx]
-            poc_price_high = bins[poc_idx+1]
-            poc_center = (poc_price_low + poc_price_high) / 2
-            
-            # 現在価格がPOCのすぐ上（0%〜+5%）にある場合は強力なサポートとして加点
-            pct_from_poc = (c_price - poc_center) / poc_center
-            if 0 <= pct_from_poc <= 0.05:
-                score += 25  # 強力なサポート上
-            elif 0.05 < pct_from_poc <= 0.15:
-                score += 15  # やや離れているが上にある
-            elif pct_from_poc < 0:
-                score += 5   # POCより下（抵抗帯になる可能性）
-
-        # --- 6. 短期モメンタム (MACD) [配分: 15点] ---
-        ema12 = close_series.ewm(span=12, adjust=False).mean()
-        ema26 = close_series.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        macd_sig = macd_line.ewm(span=9, adjust=False).mean()
-        macd_hist = macd_line - macd_sig
-        
-        if macd_line.iloc[-1] > 0 and macd_hist.iloc[-1] > 0:
-            score += 15  # 上昇トレンド＆勢い加速
-        elif macd_hist.iloc[-1] > 0:
-            score += 10  # 勢いのみ上向き（ゴールデンクロス直後など）
-            
-        normalized = min(int(score), 100)
-        return (normalized, c_price) if raw else (_score_to_label(normalized), c_price)
-        
-    except Exception as e:
-        return ("-", None) if not raw else (0, None)
-
-def calculate_buy_timing_score_v4(hist, raw=False):
-    """V4: 環境認識ハイブリッド型 (V2とV3の自動切り替え)"""
-    try:
-        if hist.empty or len(hist) < 60:
-            return ("-", None) if not raw else (0, None)
-            
-        import pandas as pd
-        c_price = float(hist['Close'].iloc[-1])
-        
-        # --- 環境判定 ---
-        # 1. 長期トレンド (200日または60日SMA)
-        period = 200 if len(hist) >= 200 else 60
-        sma_long = hist['Close'].rolling(period).mean().iloc[-1]
-        
-        # 2. ボラティリティ (ATR%を計算)
-        high_series = hist['High']
-        low_series = hist['Low']
-        close_series = hist['Close']
-        tr1 = high_series - low_series
-        tr2 = (high_series - close_series.shift()).abs()
-        tr3 = (low_series - close_series.shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean().iloc[-1]
-        atr_pct = atr / c_price if c_price > 0 else 0
-        
-        # 条件判定: SMAより上で、1日の平均変動幅(ATR)が1%以上ある銘柄は「強い上昇トレンド」とみなす
-        is_strong_trend = (c_price > sma_long) and (atr_pct >= 0.01)
-        
-        if is_strong_trend:
-            # 強い上昇トレンド・高ボラティリティ相場 -> V2 (順張り・ブレイク特化)
-            return calculate_buy_timing_score_v2(hist, raw=raw)
-        else:
-            # レンジ相場・下落トレンド・低ボラティリティ相場 -> V3 (押し目・ダマシ回避特化)
-            return calculate_buy_timing_score_v3(hist, raw=raw)
-            
-    except Exception:
-        return ("-", None) if not raw else (0, None)
 
 
 warnings.filterwarnings('ignore')
@@ -660,7 +284,7 @@ def fetch_stock_data(tickers_input):
                     # 取得成功 → 自動キャッシュに保存（次回からAPI不要）
                     name_overrides[display_ticker] = name
                     save_name_overrides(name_overrides)
-                    print(f"  💾 キャッシュ保存: {display_ticker} → {name}")
+                    print(f"  [CACHE] キャッシュ保存: {display_ticker} -> {name}")
                     time.sleep(12)  # Freeプラン: 1分5回制限（12秒間隔）
             
             # 3. yfinance shortName（日本語を含む場合のみ採用）
@@ -810,131 +434,34 @@ def fetch_stock_data(tickers_input):
                 "_score_v3": 0,
                 "_score_v4": 0
             }
-            # ミニチャート用SVGを生成
             try:
                 if not hist.empty:
-                    recent = hist['Close'].tail(30).tolist()
-                    if len(recent) >= 2:
-                        mn, mx = min(recent), max(recent)
-                        rng = mx - mn if mx != mn else 1
-                        w, h = 80, 24
-                        points = []
-                        for j, v in enumerate(recent):
-                            x = j / (len(recent) - 1) * w
-                            y = h - (v - mn) / rng * h
-                            points.append(f"{x:.1f},{y:.1f}")
-                        color = "#4caf50" if recent[-1] >= recent[0] else "#ff5252"
-                        svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg"><polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="1.5"/></svg>'
-                        data["チャート"] = svg
-                    
-                    # V1推移チャート用SVGを生成
+                    data["チャート"] = generate_price_chart_svg(hist['Close'].tail(30).tolist())
                     if len(hist) >= 40:
-                        scores_20 = []
-                        for i in range(20, 0, -1):
-                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
-                            score, _ = calculate_buy_timing_score(sub_hist, raw=True)
-                            scores_20.append(score if score is not None and score != "-" else 0)
-                        
-                        min_score, max_score = 0, 100
-                        svg_pts_v1 = []
-                        w, h = 80, 24
-                        for idx, val in enumerate(scores_20):
-                            x = idx * (w / 19)
-                            y = h - ((val - min_score) / (max_score - min_score) * h)
-                            svg_pts_v1.append(f"{x:.1f},{y:.1f}")
-                        
-                        v1_color = "#ff5252" if scores_20[-1] < scores_20[0] else "#4caf50"
-                        pts_str_v1 = " ".join(svg_pts_v1)
-                        line_50 = f'<line x1="0" y1="{h/2}" x2="{w}" y2="{h/2}" stroke="#666666" stroke-width="1" stroke-dasharray="2,2"/>'
-                        v1_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v1}" fill="none" stroke="{v1_color}" stroke-width="1.5"/></svg>'
-                        data["V1トレンド"] = v1_svg
-                        
-                    # V2推移チャート用SVGを生成
-                    if len(hist) >= 40:
-                        scores_20_v2 = []
-                        for i in range(20, 0, -1):
-                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
-                            score, _ = calculate_buy_timing_score_v2(sub_hist, raw=True)
-                            scores_20_v2.append(score if score is not None and score != "-" else 0)
-                        
-                        min_score, max_score = 0, 100
-                        svg_pts_v2 = []
-                        w, h = 80, 24
-                        for idx, val in enumerate(scores_20_v2):
-                            x = idx * (w / 19)
-                            y = h - ((val - min_score) / (max_score - min_score) * h)
-                            svg_pts_v2.append(f"{x:.1f},{y:.1f}")
-                        
-                        v2_color = "#ff5252" if scores_20_v2[-1] < scores_20_v2[0] else "#4caf50"
-                        pts_str_v2 = " ".join(svg_pts_v2)
-                        v2_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v2}" fill="none" stroke="{v2_color}" stroke-width="1.5"/></svg>'
-                        data["V2トレンド"] = v2_svg
-                        
-                    # V3推移チャート用SVGを生成
-                    if len(hist) >= 40:
-                        scores_20_v3 = []
-                        for i in range(20, 0, -1):
-                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
-                            score, _ = calculate_buy_timing_score_v3(sub_hist, raw=True)
-                            scores_20_v3.append(score if score is not None and score != "-" else 0)
-                        
-                        min_score, max_score = 0, 100
-                        svg_pts_v3 = []
-                        w, h = 80, 24
-                        for idx, val in enumerate(scores_20_v3):
-                            x = idx * (w / 19)
-                            y = h - ((val - min_score) / (max_score - min_score) * h)
-                            svg_pts_v3.append(f"{x:.1f},{y:.1f}")
-                        
-                        v3_color = "#ff5252" if scores_20_v3[-1] < scores_20_v3[0] else "#4caf50"
-                        pts_str_v3 = " ".join(svg_pts_v3)
-                        v3_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v3}" fill="none" stroke="{v3_color}" stroke-width="1.5"/></svg>'
-                        data["V3トレンド"] = v3_svg
-                        
-                    # V4推移チャート用SVGを生成
-                    if len(hist) >= 40:
-                        scores_20_v4 = []
-                        for i in range(20, 0, -1):
-                            sub_hist = hist if i == 1 else hist.iloc[:-i+1]
-                            score, _ = calculate_buy_timing_score_v4(sub_hist, raw=True)
-                            scores_20_v4.append(score if score is not None and score != "-" else 0)
-                        
-                        min_score, max_score = 0, 100
-                        svg_pts_v4 = []
-                        w, h = 80, 24
-                        for idx, val in enumerate(scores_20_v4):
-                            x = idx * (w / 19)
-                            y = h - ((val - min_score) / (max_score - min_score) * h)
-                            svg_pts_v4.append(f"{x:.1f},{y:.1f}")
-                        
-                        v4_color = "#ff5252" if scores_20_v4[-1] < scores_20_v4[0] else "#4caf50"
-                        pts_str_v4 = " ".join(svg_pts_v4)
-                        v4_svg = f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">{line_50}<polyline points="{pts_str_v4}" fill="none" stroke="{v4_color}" stroke-width="1.5"/></svg>'
-                        data["V4トレンド"] = v4_svg
-                        
-                        
+                        data["V1トレンド"] = generate_score_trend_svg(hist, calculate_buy_timing_score)
+                        data["V2トレンド"] = generate_score_trend_svg(hist, calculate_buy_timing_score_v2)
+                        data["V3トレンド"] = generate_score_trend_svg(hist, calculate_buy_timing_score_v3)
+                        data["V4トレンド"] = generate_score_trend_svg(hist, calculate_buy_timing_score_v4)
             except Exception:
                 pass
-            # ソート/フィルタ用のスコア数値を抽出
             try:
-                import re as _re
-                m1 = _re.search(r'(\d+)%', str(buy_timing_rate))
+                m1 = re.search(r'(\d+)%', str(buy_timing_rate))
                 if m1:
                     data["_score_v1"] = int(m1.group(1))
-                m2 = _re.search(r'(\d+)%', str(buy_timing_v2))
+                m2 = re.search(r'(\d+)%', str(buy_timing_v2))
                 if m2:
                     data["_score_v2"] = int(m2.group(1))
-                m3 = _re.search(r'(\d+)%', str(data.get("買い時率V3", "-")))
+                m3 = re.search(r'(\d+)%', str(data.get("買い時率V3", "-")))
                 if m3:
                     data["_score_v3"] = int(m3.group(1))
-                m4 = _re.search(r'(\d+)%', str(data.get("買い時率V4", "-")))
+                m4 = re.search(r'(\d+)%', str(data.get("買い時率V4", "-")))
                 if m4:
                     data["_score_v4"] = int(m4.group(1))
             except Exception:
                 pass
             data_list.append(data)
         except Exception as e:
-            st.error(f"「{display_ticker}」 のデータ取得に失敗しました。銘柄が正しいか確認してください。")
+            st.error(f"「{display_ticker}」 のデータ取得に失敗しました。銘柄が正しいか確認してください。\n```{e}```")
     
     progress_bar.progress(1.0, text="取得完了！")
     
@@ -1103,72 +630,40 @@ def smart_refetch(existing_df, tickers_input, same_day=True):
             except Exception:
                 pass
             
-            if same_day:
-                # 当日再取得: 企業名・リンク・配当・決算は前回データを再利用
-                data = {
-                    "銘柄コード": display_ticker,
-                    "企業名": prev.get("企業名", display_ticker),
-                    "リンク": prev.get("リンク", ""),
-                    "現在株価": current_price,
-                    "チャート": chart_svg,
-                    "V1トレンド": v1_svg,
-                    "V2トレンド": v2_svg,
-                    "V3トレンド": v3_svg,
-                    "V4トレンド": v4_svg,
-                    "買い時率V1": buy_timing_rate,
-                    "買い時率V2": buy_timing_v2,
-                    "買い時率V3": buy_timing_v3,
-                    "買い時率V4": buy_timing_v4,
-                    "1W前買い時率": buy_timing_1w,
-                    "1W前株価": price_1w,
-                    "1W変動": chg_1w,
-                    "2W前買い時率": buy_timing_2w,
-                    "2W前株価": price_2w,
-                    "2W変動": chg_2w,
-                    "1か月後予想株価": predicted_trend,
-                    "出来高": volume_str,
-                    "平均出来高": avg_volume_str,
-                    "出来高比率": volume_ratio_str,
-                    "配当金(年額)": prev.get("配当金(年額)", "-"),
-                    "配当利回り": prev.get("配当利回り", "-"),
-                    "配当落ち日": prev.get("配当落ち日", "-"),
-                    "次回決算日": prev.get("次回決算日", "-"),
-                    "_score_v1": 0,
-                    "_score_v2": 0
-                }
-            else:
-                # 別日再取得: 企業名・リンク・配当・決算は前回データを再利用
-                data = {
-                    "銘柄コード": display_ticker,
-                    "企業名": prev.get("企業名", display_ticker),
-                    "リンク": prev.get("リンク", ""),
-                    "現在株価": current_price,
-                    "チャート": chart_svg,
-                    "V1トレンド": v1_svg,
-                    "V2トレンド": v2_svg,
-                    "V3トレンド": v3_svg,
-                    "V4トレンド": v4_svg,
-                    "買い時率V1": buy_timing_rate,
-                    "買い時率V2": buy_timing_v2,
-                    "買い時率V3": buy_timing_v3,
-                    "買い時率V4": buy_timing_v4,
-                    "1W前買い時率": buy_timing_1w,
-                    "1W前株価": price_1w,
-                    "1W変動": chg_1w,
-                    "2W前買い時率": buy_timing_2w,
-                    "2W前株価": price_2w,
-                    "2W変動": chg_2w,
-                    "1か月後予想株価": predicted_trend,
-                    "出来高": volume_str,
-                    "平均出来高": avg_volume_str,
-                    "出来高比率": volume_ratio_str,
-                    "配当金(年額)": prev.get("配当金(年額)", "-"),
-                    "配当利回り": prev.get("配当利回り", "-"),
-                    "配当落ち日": prev.get("配当落ち日", "-"),
-                    "次回決算日": prev.get("次回決算日", "-"),
-                    "_score_v1": 0,
-                    "_score_v2": 0
-                }
+            # 共通データ辞書を構築（same_day/別日で共通の部分）
+            data = {
+                "銘柄コード": display_ticker,
+                "企業名": prev.get("企業名", display_ticker),
+                "リンク": prev.get("リンク", ""),
+                "現在株価": current_price,
+                "チャート": chart_svg,
+                "V1トレンド": v1_svg,
+                "V2トレンド": v2_svg,
+                "V3トレンド": v3_svg,
+                "V4トレンド": v4_svg,
+                "買い時率V1": buy_timing_rate,
+                "買い時率V2": buy_timing_v2,
+                "買い時率V3": buy_timing_v3,
+                "買い時率V4": buy_timing_v4,
+                "1W前買い時率": buy_timing_1w,
+                "1W前株価": price_1w,
+                "1W変動": chg_1w,
+                "2W前買い時率": buy_timing_2w,
+                "2W前株価": price_2w,
+                "2W変動": chg_2w,
+                "1か月後予想株価": predicted_trend,
+                "出来高": volume_str,
+                "平均出来高": avg_volume_str,
+                "出来高比率": volume_ratio_str,
+                "配当金(年額)": prev.get("配当金(年額)", "-"),
+                "配当利回り": prev.get("配当利回り", "-"),
+                "配当落ち日": prev.get("配当落ち日", "-"),
+                "次回決算日": prev.get("次回決算日", "-"),
+                "_score_v1": 0,
+                "_score_v2": 0,
+                "_score_v3": 0,
+                "_score_v4": 0,
+            }
             
             # スコア数値抽出
             try:
@@ -1360,23 +855,11 @@ if "stock_df" in st.session_state:
     
     st.success(f"データ取得完了！（最終取得: {fetch_time}）")
     
-    # --- コントロールバー: ソート、フィルタ、表示切替 ---
-    ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([1, 1, 1])
+    # --- コントロールバー: フィルタ、表示切替 ---
+    ctrl_c1, ctrl_c2 = st.columns([1, 1])
     with ctrl_c1:
-        sort_option = st.selectbox("↕️ ソート", [
-            "なし", 
-            "銘柄コード ⬇", "銘柄コード ⬆", 
-            "現在株価 ⬇", "現在株価 ⬆",
-            "1W変動 ⬇", "1W変動 ⬆",
-            "配当利回り ⬇", "配当利回り ⬆",
-            "買い時率V4 ⬇", "買い時率V4 ⬆", 
-            "買い時率V3 ⬇", "買い時率V3 ⬆", 
-            "買い時率V2 ⬇", "買い時率V2 ⬆", 
-            "買い時率V1 ⬇", "買い時率V1 ⬆"
-        ], label_visibility="collapsed")
-    with ctrl_c2:
         filter_option = st.selectbox("🎯 フィルタ", ["すべて", "🔥 V4 買い時 (≥65%)", "🔥🔥 V4 絶好機 (≥85%)", "❄️ V4 様子見 (<40%)", "🔥 V3 買い時 (≥65%)", "🔥🔥 V3 絶好機 (≥85%)", "❄️ V3 様子見 (<40%)", "🔥 V2 買い時 (≥65%)", "🔥🔥 V2 絶好機 (≥85%)", "❄️ V2 様子見 (<40%)", "🔥 V1 買い時 (≥65%)", "🔥🔥 V1 絶好機 (≥85%)", "❄️ V1 様子見 (<40%)"], label_visibility="collapsed")
-    with ctrl_c3:
+    with ctrl_c2:
         view_mode = st.selectbox("👁 表示", ["詳細表示", "簡易表示"], label_visibility="collapsed")
     
     # --- フィルタ適用 ---
@@ -1409,51 +892,42 @@ if "stock_df" in st.session_state:
             display_df = display_df[display_df["_score_v1"] >= 85]
         elif "<40%" in filter_option:
             display_df = display_df[display_df["_score_v1"] < 40]
-    
-    # --- ソート適用 ---
-    if sort_option != "なし":
-        asc = "⬆" in sort_option
-        if "買い時率V4" in sort_option and "_score_v4" in display_df.columns:
-            display_df = display_df.sort_values("_score_v4", ascending=asc)
-        elif "買い時率V3" in sort_option and "_score_v3" in display_df.columns:
-            display_df = display_df.sort_values("_score_v3", ascending=asc)
-        elif "買い時率V2" in sort_option and "_score_v2" in display_df.columns:
-            display_df = display_df.sort_values("_score_v2", ascending=asc)
-        elif "買い時率V1" in sort_option and "_score_v1" in display_df.columns:
-            display_df = display_df.sort_values("_score_v1", ascending=asc)
-        elif "銘柄コード" in sort_option:
-            display_df = display_df.sort_values("銘柄コード", ascending=asc)
-        elif "現在株価" in sort_option:
-            # "1,234.50" 等のカンマを除去して数値化
-            display_df["_sort_price"] = display_df["現在株価"].astype(str).str.replace(",", "", regex=False)
-            display_df["_sort_price"] = pd.to_numeric(display_df["_sort_price"], errors="coerce").fillna(-999)
-            display_df = display_df.sort_values("_sort_price", ascending=asc)
-            display_df = display_df.drop(columns=["_sort_price"])
-        elif "配当利回り" in sort_option:
-            # "3.45%" や "-" を数値に変換
-            display_df["_sort_div"] = display_df["配当利回り"].astype(str).str.replace("%", "", regex=False).str.replace("-", "-999", regex=False)
-            display_df["_sort_div"] = pd.to_numeric(display_df["_sort_div"], errors="coerce").fillna(-999)
-            display_df = display_df.sort_values("_sort_div", ascending=asc)
-            display_df = display_df.drop(columns=["_sort_div"])
-        elif "1W変動" in sort_option:
-            # "📈 +2.5%" 等から数値を抽出
-            if "1W変動" in display_df.columns:
-                display_df["_sort_1w"] = display_df["1W変動"].astype(str).str.extract(r'([+-]?\d+\.?\d*)').astype(float).fillna(-999)
-                display_df = display_df.sort_values("_sort_1w", ascending=asc)
-                display_df = display_df.drop(columns=["_sort_1w"])
+            
+    # --- SVG・リンクの変換 ---
+    def to_svg_uri(svg_str):
+        if not isinstance(svg_str, str) or not svg_str.startswith("<svg"):
+            return svg_str
+        return "data:image/svg+xml;utf8," + urllib.parse.quote(svg_str)
+
+    for c in ["チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド"]:
+        if c in display_df.columns:
+            display_df[c] = display_df[c].apply(to_svg_uri)
+
+    def extract_urls(html_str):
+        if not isinstance(html_str, str): return [None, None, None, None]
+        urls = re.findall(r'href="(.*?)"', html_str)
+        urls += [None] * (4 - len(urls))
+        return urls[:4]
+
+    if "リンク" in display_df.columns:
+        links_data = display_df["リンク"].apply(extract_urls)
+        display_df["📘"] = [x[0] for x in links_data]
+        display_df["📗"] = [x[1] for x in links_data]
+        display_df["📙"] = [x[2] for x in links_data]
+        display_df["📕"] = [x[3] for x in links_data]
     
     # --- 列表示切替 ---
-    simple_cols = ["銘柄コード", "企業名", "リンク", "現在株価", "チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4", "配当利回り"]
+    simple_cols = ["銘柄コード", "企業名", "📘", "📗", "📙", "📕", "現在株価", "チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4", "配当利回り"]
     if view_mode == "簡易表示":
         cols_to_show = [c for c in simple_cols if c in display_df.columns]
     else:
         # 詳細表示の場合も指定の並び順にする
         target_cols = [
-            "銘柄コード", "企業名", "リンク", "現在株価", "チャート",
+            "銘柄コード", "企業名", "📘", "📗", "📙", "📕", "現在株価", "チャート",
             "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", 
             "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4"
         ]
-        other_cols = [c for c in display_df.columns if not c.startswith("_") and c not in target_cols]
+        other_cols = [c for c in display_df.columns if not c.startswith("_") and c not in target_cols and c != "リンク"]
         cols_to_show = [c for c in target_cols if c in display_df.columns] + other_cols
     
     show_df = display_df[cols_to_show]
@@ -1466,64 +940,23 @@ if "stock_df" in st.session_state:
             current_cols = ["現在株価", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4"]
             for col in current_cols:
                 if col in styler.columns:
-                    styler = styler.set_properties(subset=[col], **{"background-color": "#1a3a22"})
+                    styler = styler.map(lambda x: "background-color: #1a3a22", subset=[col])
             return styler
         
         styled_df = show_df.style.pipe(style_table)
-        table_html = styled_df.to_html(escape=False)
         
-        # Pandasが生成するインラインスタイルのcolor指定を白に強制変換
-        # （CSSの!importantだけではStreamlit上で効かない場合があるため直接加工）
-        table_html = table_html.replace('color: #e0e0e0', 'color: #ffffff')
-        table_html = table_html.replace('color: #000000', 'color: #ffffff')
-        # td要素にstyle属性がない場合にも対応するため、全tdにcolor追加
-        table_html = table_html.replace('<td ', '<td style="color:#ffffff;" ')
-        table_html = table_html.replace('<th ', '<th style="color:#ffffff;" ')
-        # 変動列の色は保持（上で追加したstyleの後にPandasのstyleが来るのでOK）
+        # --- Native DataFrame ---
+        col_config = {
+            c: st.column_config.ImageColumn(c, width="medium") 
+            for c in ["チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド"] if c in show_df.columns
+        }
         
-        # テーブル表示用CSS
-        st.markdown("""
-        <style>
-        .stock-table-wrapper table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.85em;
-        }
-        .stock-table-wrapper th {
-            background-color: #1e2a3a;
-            padding: 8px 10px;
-            text-align: center;
-            white-space: nowrap;
-            position: sticky;
-            top: 0;
-            border-bottom: 2px solid #4a6fa5;
-            font-weight: 700;
-            font-size: 0.9em;
-        }
-        .stock-table-wrapper td {
-            padding: 6px 10px;
-            text-align: center;
-            white-space: nowrap;
-            border-bottom: 1px solid #2a2a3a;
-            background-color: #131722;
-        }
-        /* 買い時率 現在（緑系）、1W前（青系）、2W前（紫系）の背景色はPandas Stylerで指定しています */
-        .stock-table-wrapper tr:hover td {
-            filter: brightness(1.25);
-        }
-        .stock-table-wrapper a {
-            text-decoration: none;
-            font-size: 1.2em;
-            margin: 0 2px;
-        }
-        .stock-table-wrapper a:hover {
-            transform: scale(1.3);
-            display: inline-block;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+        link_displays = {"📘": "四季報", "📗": "みんかぶ", "📙": "かぶたん", "📕": "BC"}
+        for k, v in link_displays.items():
+            if k in show_df.columns:
+                col_config[k] = st.column_config.LinkColumn(v, display_text=k)
         
-        st.markdown(f'<div class="stock-table-wrapper" style="overflow-x:auto;">{table_html}</div>', unsafe_allow_html=True)
+        st.dataframe(styled_df, column_config=col_config, use_container_width=True, hide_index=True)
         
         # 凡例
         st.markdown("""
@@ -1549,6 +982,10 @@ if "stock_df" in st.session_state:
         df_csv = df_csv.drop(columns=["V1トレンド"])
     if "V2トレンド" in df_csv.columns:
         df_csv = df_csv.drop(columns=["V2トレンド"])
+    if "V3トレンド" in df_csv.columns:
+        df_csv = df_csv.drop(columns=["V3トレンド"])
+    if "V4トレンド" in df_csv.columns:
+        df_csv = df_csv.drop(columns=["V4トレンド"])
     csv = df_csv.to_csv(index=False).encode('utf-8-sig')
     
     st.download_button(
