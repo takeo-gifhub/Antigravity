@@ -183,7 +183,14 @@ with st.sidebar.expander("✏️ 企業名の修正", expanded=False):
         # 現在の全ウォッチリストから銘柄コードを収集
         all_codes = set()
         for wl_codes in watchlists.values():
-            if isinstance(wl_codes, list):
+            if isinstance(wl_codes, str):
+                # カンマ区切り or 改行区切りの文字列をパース
+                codes = re.split(r'[,\n\r\s]+', wl_codes.strip())
+                for code in codes:
+                    code_str = code.strip()
+                    if code_str.isdigit():
+                        all_codes.add(code_str)
+            elif isinstance(wl_codes, list):
                 for code in wl_codes:
                     code_str = str(code).strip()
                     if code_str.isdigit():
