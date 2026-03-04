@@ -855,12 +855,8 @@ if "stock_df" in st.session_state:
     
     st.success(f"データ取得完了！（最終取得: {fetch_time}）")
     
-    # --- コントロールバー: フィルタ、表示切替 ---
-    ctrl_c1, ctrl_c2 = st.columns([1, 1])
-    with ctrl_c1:
-        filter_option = st.selectbox("🎯 フィルタ", ["すべて", "🔥 V4 買い時 (≥65%)", "🔥🔥 V4 絶好機 (≥85%)", "❄️ V4 様子見 (<40%)", "🔥 V3 買い時 (≥65%)", "🔥🔥 V3 絶好機 (≥85%)", "❄️ V3 様子見 (<40%)", "🔥 V2 買い時 (≥65%)", "🔥🔥 V2 絶好機 (≥85%)", "❄️ V2 様子見 (<40%)", "🔥 V1 買い時 (≥65%)", "🔥🔥 V1 絶好機 (≥85%)", "❄️ V1 様子見 (<40%)"], label_visibility="collapsed")
-    with ctrl_c2:
-        view_mode = st.selectbox("👁 表示", ["詳細表示", "簡易表示"], label_visibility="collapsed")
+    # --- フィルタ ---
+    filter_option = st.selectbox("🎯 フィルタ", ["すべて", "🔥 V4 買い時 (≥65%)", "🔥🔥 V4 絶好機 (≥85%)", "❄️ V4 様子見 (<40%)", "🔥 V3 買い時 (≥65%)", "🔥🔥 V3 絶好機 (≥85%)", "❄️ V3 様子見 (<40%)", "🔥 V2 買い時 (≥65%)", "🔥🔥 V2 絶好機 (≥85%)", "❄️ V2 様子見 (<40%)", "🔥 V1 買い時 (≥65%)", "🔥🔥 V1 絶好機 (≥85%)", "❄️ V1 様子見 (<40%)"], label_visibility="collapsed")
     
     # --- フィルタ適用 ---
     display_df = df.copy()
@@ -916,57 +912,80 @@ if "stock_df" in st.session_state:
         display_df["📙"] = [x[2] for x in links_data]
         display_df["📕"] = [x[3] for x in links_data]
     
-    # --- 列表示切替 ---
-    simple_cols = ["銘柄コード", "企業名", "📘", "📗", "📙", "📕", "現在株価", "チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4", "配当利回り"]
-    if view_mode == "簡易表示":
-        cols_to_show = [c for c in simple_cols if c in display_df.columns]
-    else:
-        # 詳細表示の場合も指定の並び順にする
-        target_cols = [
-            "銘柄コード", "企業名", "📘", "📗", "📙", "📕", "現在株価", "チャート",
-            "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド", 
-            "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4"
-        ]
-        other_cols = [c for c in display_df.columns if not c.startswith("_") and c not in target_cols and c != "リンク"]
-        cols_to_show = [c for c in target_cols if c in display_df.columns] + other_cols
-    
-    show_df = display_df[cols_to_show]
-    
-    if show_df.empty:
+    if display_df.empty:
         st.info("該当する銘柄がありません")
     else:
-        # --- 色分けスタイルを適用 ---
-        def style_table(styler):
-            current_cols = ["現在株価", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4"]
-            for col in current_cols:
+        # --- 共通列（全タブで表示） ---
+        fixed_cols = ["銘柄コード", "企業名"]
+        
+        # --- タブ定義 ---
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 スコア・チャート", "📈 出来高", "💰 配当・決算", "🔗 リンク"])
+        
+        # 画像列の設定
+        image_col_config = {
+            c: st.column_config.ImageColumn(c, width="medium") 
+            for c in ["チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド"] if c in display_df.columns
+        }
+        
+        # スタイル関数
+        def style_highlight(styler, highlight_cols):
+            for col in highlight_cols:
                 if col in styler.columns:
                     styler = styler.map(lambda x: "background-color: #1a3a22", subset=[col])
             return styler
         
-        styled_df = show_df.style.pipe(style_table)
+        # --- タブ1: スコア・チャート ---
+        with tab1:
+            tab1_cols = [
+                "現在株価", "チャート",
+                "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド",
+                "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4",
+                "1W前買い時率", "1W前株価", "1W変動",
+                "2W前買い時率", "2W前株価", "2W変動",
+                "1か月後予想株価"
+            ]
+            cols = [c for c in fixed_cols + tab1_cols if c in display_df.columns]
+            tab1_df = display_df[cols]
+            styled = tab1_df.style.pipe(lambda s: style_highlight(s, ["現在株価", "買い時率V1", "買い時率V2", "買い時率V3", "買い時率V4"]))
+            st.dataframe(styled, column_config=image_col_config, use_container_width=True, hide_index=True)
+            st.markdown("""
+            <div style="display:flex; gap:16px; font-size:0.85em; margin-top:4px; margin-bottom:8px; flex-wrap:wrap;">
+                <span>🟢 <b>緑</b>=現在</span>
+                <span>🟦 <b>青</b>=1W前</span>
+                <span>🟪 <b>紫</b>=2W前</span>
+            </div>
+            """, unsafe_allow_html=True)
         
-        # --- Native DataFrame ---
-        col_config = {
-            c: st.column_config.ImageColumn(c, width="medium") 
-            for c in ["チャート", "V1トレンド", "V2トレンド", "V3トレンド", "V4トレンド"] if c in show_df.columns
-        }
+        # --- タブ2: 出来高 ---
+        with tab2:
+            tab2_cols = ["出来高", "平均出来高", "出来高比率"]
+            cols = [c for c in fixed_cols + tab2_cols if c in display_df.columns]
+            tab2_df = display_df[cols]
+            st.dataframe(tab2_df, use_container_width=True, hide_index=True)
         
-        link_displays = {"📘": "四季報", "📗": "みんかぶ", "📙": "かぶたん", "📕": "BC"}
-        for k, v in link_displays.items():
-            if k in show_df.columns:
-                col_config[k] = st.column_config.LinkColumn(v, display_text=k)
+        # --- タブ3: 配当・決算 ---
+        with tab3:
+            tab3_cols = ["配当金(年額)", "配当利回り", "配当落ち日", "次回決算日"]
+            cols = [c for c in fixed_cols + tab3_cols if c in display_df.columns]
+            tab3_df = display_df[cols]
+            st.dataframe(tab3_df, use_container_width=True, hide_index=True)
         
-        st.dataframe(styled_df, column_config=col_config, use_container_width=True, hide_index=True)
-        
-        # 凡例
-        st.markdown("""
-        <div style="display:flex; gap:16px; font-size:0.85em; margin-top:4px; margin-bottom:8px; flex-wrap:wrap;">
-            <span>🟢 <b>緑</b>=現在</span>
-            <span>🟦 <b>青</b>=1W前</span>
-            <span>🟪 <b>紫</b>=2W前</span>
-            <span>📘四季報 📗みんかぶ 📙かぶたん 📕BC</span>
-        </div>
-        """, unsafe_allow_html=True)
+        # --- タブ4: リンク ---
+        with tab4:
+            tab4_cols = ["📘", "📗", "📙", "📕"]
+            cols = [c for c in fixed_cols + tab4_cols if c in display_df.columns]
+            tab4_df = display_df[cols]
+            link_col_config = {}
+            link_displays = {"📘": "四季報", "📗": "みんかぶ", "📙": "かぶたん", "📕": "BC"}
+            for k, v in link_displays.items():
+                if k in tab4_df.columns:
+                    link_col_config[k] = st.column_config.LinkColumn(v, display_text=k)
+            st.dataframe(tab4_df, column_config=link_col_config, use_container_width=True, hide_index=True)
+            st.markdown("""
+            <div style="font-size:0.85em; margin-top:4px; margin-bottom:8px;">
+                📘四季報 📗みんかぶ 📙かぶたん 📕BC
+            </div>
+            """, unsafe_allow_html=True)
     
     # CSV出力
     df_csv = df.copy()
