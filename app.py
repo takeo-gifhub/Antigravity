@@ -198,27 +198,29 @@ with st.sidebar.expander("✏️ 企業名の修正", expanded=False):
         
         if not all_codes:
             st.warning("ウォッチリストに銘柄がありません")
-        elif not saved_jq_api_key:
-            st.warning("J-Quants APIキーが設定されていません。管理画面で設定してください。")
         else:
-            progress = st.progress(0, text="企業名を取得中...")
-            updated_count = 0
-            codes_list = sorted(all_codes)
-            for i, code in enumerate(codes_list):
-                progress.progress((i + 1) / len(codes_list), text=f"企業名を取得中... {code} ({i+1}/{len(codes_list)})")
-                new_name = get_jquants_company_name(saved_jq_api_key, code)
-                if new_name:
-                    new_name = new_name.replace("株式会社", "").strip()
-                    old_name = overrides.get(code, "")
-                    if old_name != new_name:
-                        overrides[code] = new_name
-                        updated_count += 1
-                    time.sleep(12)  # Freeプラン: 1分5回制限
-            save_name_overrides(overrides)
-            progress.empty()
-            st.success(f"完了！ {updated_count}件の企業名を更新しました")
-            if updated_count > 0:
-                st.rerun()
+            jq_key = load_jquants_token()
+            if not jq_key:
+                st.warning("J-Quants APIキーが設定されていません。管理画面で設定してください。")
+            else:
+                progress = st.progress(0, text="企業名を取得中...")
+                updated_count = 0
+                codes_list = sorted(all_codes)
+                for i, code in enumerate(codes_list):
+                    progress.progress((i + 1) / len(codes_list), text=f"企業名を取得中... {code} ({i+1}/{len(codes_list)})")
+                    new_name = get_jquants_company_name(jq_key, code)
+                    if new_name:
+                        new_name = new_name.replace("株式会社", "").strip()
+                        old_name = overrides.get(code, "")
+                        if old_name != new_name:
+                            overrides[code] = new_name
+                            updated_count += 1
+                        time.sleep(12)  # Freeプラン: 1分5回制限
+                save_name_overrides(overrides)
+                progress.empty()
+                st.success(f"完了！ {updated_count}件の企業名を更新しました")
+                if updated_count > 0:
+                    st.rerun()
     
     # 登録済みの修正一覧と削除
     existing_overrides = load_name_overrides()
